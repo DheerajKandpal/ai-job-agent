@@ -39,35 +39,157 @@ def _collect_skills(payload) -> set[str]:
     return skills
 
 
-def generate_tailored_resume(resume_json: dict, job_description: str) -> dict:
+def generate_tailored_resume(
+    resume_json: dict, job_description: str, debug: bool = False
+) -> dict:
     resume_text = json.dumps(resume_json, ensure_ascii=True, indent=2)
 
     system_prompt = """
-You are a resume optimization assistant.
+SYSTEM INSTRUCTION - STRICTLY FOLLOW. FAIL IF NOT FOLLOWED.
 
-STRICT RULES:
-- Do NOT add new skills, tools, or experience
-- Do NOT fabricate facts
-- You ARE allowed to:
-    - Rewrite bullet points to be more impactful
-    - Use action verbs
-    - Add metrics if already implied
-    - Improve clarity and relevance
+You are a deterministic resume tailoring engine.
 
-Return ONLY valid JSON.
+Behavior rules:
+- ONLY use facts, skills, tools, technologies, responsibilities, and experience present in base_resume.
+- DO NOT add new skills.
+- DO NOT add new tools.
+- DO NOT add new companies, roles, dates, metrics, credentials, projects, or achievements.
+- DO NOT hallucinate.
+- DO NOT infer facts that are not explicitly present in base_resume.
+- ONLY rewrite, reorder, and emphasize existing resume content.
+- Extract relevant keywords from job_description and use them ONLY when they match existing content in base_resume.
+- Preserve the meaning and truth of every resume detail.
+- Return ONLY valid JSON.
+- No explanation.
+- No markdown.
+- No extra text.
+- Your entire response MUST start with '{' and end with '}'.
+- Perform an internal validation step:
+  - Check that all skills in output exist in base_resume.
+  - Remove any skill not found in base_resume.
+- If unsure, return empty valid JSON structure:
+  {
+    "summary": "",
+    "experience": [],
+    "skills": []
+  }
+- Before returning output:
+  - Ensure the response is valid JSON.
+  - Ensure it can be parsed by a strict JSON parser.
+  - Ensure no trailing commas.
+  - Ensure all keys and strings use double quotes.
+  - Ensure no text exists before or after the JSON object.
+  - If invalid, FIX it before returning.
 """.strip()
 
     user_prompt = (
-        f"Resume JSON:\n{resume_text}\n\n"
-        f"Job Description:\n{job_description}\n\n"
-        "TASK:\n"
-        "- Improve bullet points\n"
-        "- Highlight relevant skills\n"
-        "- Keep facts EXACT\n"
-        "- Return ONLY JSON (no explanation)"
+        "CONTEXT\n\n"
+        "job_description:\n"
+        f"{job_description}\n\n"
+        "base_resume JSON:\n"
+        f"{resume_text}\n\n"
+        "TASK - STRICTLY FOLLOW. FAIL IF NOT FOLLOWED.\n"
+        "- Extract relevant keywords from job_description.\n"
+        "- Compare those keywords against ONLY the content already present in base_resume.\n"
+        "- Tailor the resume by rewriting, reordering, and emphasizing matching existing content.\n"
+        "- Do NOT introduce any keyword, skill, responsibility, tool, or claim unless it already exists in base_resume.\n\n"
+        "OUTPUT FORMAT - MANDATORY. FAIL IF NOT FOLLOWED.\n"
+        "Return EXACTLY this JSON shape and nothing else:\n"
+        "{\n"
+        '  "summary": "string",\n'
+        '  "experience": ["string"],\n'
+        '  "skills": ["string"]\n'
+        "}\n\n"
+        "FINAL HARD CONSTRAINTS:\n"
+        "- Return ONLY valid JSON.\n"
+        "- No explanation.\n"
+        "- No markdown.\n"
+        "- No extra text.\n"
+        "- Your entire response MUST start with '{' and end with '}'.\n\n"
+        "SELF-CHECK STEP:\n"
+        "Perform an internal validation step:\n"
+        "- Check that all skills in output exist in base_resume.\n"
+        "- Remove any skill not found in base_resume.\n\n"
+        "EMPTY FALLBACK RULE:\n"
+        "If unsure, return empty valid JSON structure:\n"
+        "{\n"
+        '  "summary": "",\n'
+        '  "experience": [],\n'
+        '  "skills": []\n'
+        "}\n\n"
+        "JSON ENFORCEMENT GUARD:\n"
+        "Before returning output:\n"
+        "- Ensure the response is valid JSON.\n"
+        "- Ensure it can be parsed by a strict JSON parser.\n"
+        "- Ensure no trailing commas.\n"
+        "- Ensure all keys and strings use double quotes.\n"
+        "- Ensure no text exists before or after the JSON object.\n"
+        "- If invalid, FIX it before returning."
     )
 
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    if debug:
+        print(f"Final prompt sent to model:\n{full_prompt}")
+
+    safe_fallback = {
+        "summary": "",
+        "experience": [],
+        "skills": [],
+    }
+
+    def _sanitize_parsed_output(payload) -> dict:
+        if not isinstance(payload, dict):
+            return safe_fallback
+
+        summary = payload.get("summary", "")
+        if not isinstance(summary, str):
+            summary = ""
+
+        experience = payload.get("experience", [])
+        if not isinstance(experience, list):
+            experience = []
+
+        skills = payload.get("skills", [])
+        if not isinstance(skills, list):
+            skills = []
+
+        def sanitize_str_list(items: list) -> list[str]:
+            sanitized = []
+            for item in items:
+                if isinstance(item, str):
+                    sanitized.append(item)
+                elif item is None:
+                    continue
+                else:
+                    try:
+                        sanitized.append(str(item))
+                    except (TypeError, ValueError):
+                        continue
+            return sanitized
+
+        return {
+            "summary": summary,
+            "experience": sanitize_str_list(experience),
+            "skills": sanitize_str_list(skills),
+        }
+
+    def _extract_json_guard(text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+        first_open = cleaned.find("{")
+        last_close = cleaned.rfind("}")
+        if first_open != -1 and last_close != -1 and first_open <= last_close:
+            return cleaned[first_open : last_close + 1].strip()
+        return cleaned
+
+    def _finalize_output(payload) -> dict:
+        final_output = _sanitize_parsed_output(payload)
+        if debug:
+            print(f"Final sanitized result: {final_output}")
+        return final_output
+
+    sanitized_fallback = _finalize_output(safe_fallback)
 
     try:
         result = subprocess.run(
@@ -75,37 +197,86 @@ Return ONLY valid JSON.
             input=full_prompt,
             text=True,
             capture_output=True,
+            timeout=30,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        print(f"Ollama subprocess timed out and was killed: {exc}")
+        return sanitized_fallback
     except (OSError, ValueError):
-        return resume_json
+        return sanitized_fallback
 
-    if result.returncode != 0 or not result.stdout.strip():
-        return resume_json
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
 
-    json_block = _extract_json_block(result.stdout)
-    if not json_block:
-        return resume_json
+    if stderr:
+        print(f"Ollama stderr: {stderr}")
+
+    if result.returncode != 0 or not stdout:
+        print(f"Ollama subprocess failed with return code {result.returncode}")
+        return sanitized_fallback
+
+    raw_output = stdout.strip()
+    if debug:
+        print(f"Raw output (first response): {raw_output}")
+    if not raw_output:
+        return sanitized_fallback
+
+    raw_output = _extract_json_guard(raw_output)
 
     try:
-        tailored_json = json.loads(json_block)
+        parsed_output = json.loads(raw_output)
+        return _finalize_output(parsed_output)
     except json.JSONDecodeError:
-        return resume_json
+        correction_prompt = (
+            "STRICTLY FIX THIS OUTPUT.\n"
+            "Return ONLY valid JSON.\n"
+            "No explanation.\n"
+            "No markdown.\n"
+            "Response MUST start with '{' and end with '}'.\n\n"
+            f"{raw_output}"
+        )
 
-    if not isinstance(tailored_json, dict):
-        return resume_json
+        try:
+            retry_result = subprocess.run(
+                ["ollama", "run", "qwen2.5-coder"],
+                input=correction_prompt,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            print(f"Ollama correction subprocess timed out and was killed: {exc}")
+            return sanitized_fallback
+        except (OSError, ValueError):
+            return sanitized_fallback
 
-    if not _same_top_level_keys(resume_json, tailored_json):
-        return resume_json
+        retry_stdout = (retry_result.stdout or "").strip()
+        retry_stderr = (retry_result.stderr or "").strip()
 
-    original_skills = _collect_skills(resume_json)
-    tailored_skills = _collect_skills(tailored_json)
-    if not tailored_skills.issubset(original_skills):
-        print("LLM rejected due to new skills")
-        return resume_json
+        if retry_stderr:
+            print(f"Ollama correction stderr: {retry_stderr}")
 
-    print("LLM output accepted")
-    return tailored_json
+        if retry_result.returncode != 0 or not retry_stdout:
+            print(
+                f"Ollama correction subprocess failed with return code {retry_result.returncode}"
+            )
+            return sanitized_fallback
+
+        retry_raw_output = retry_stdout.strip()
+        if debug:
+            print(f"Retry output: {retry_raw_output}")
+        if not retry_raw_output:
+            return sanitized_fallback
+
+        retry_raw_output = _extract_json_guard(retry_raw_output)
+
+        try:
+            retry_parsed_output = json.loads(retry_raw_output)
+            return _finalize_output(retry_parsed_output)
+        except json.JSONDecodeError:
+            return sanitized_fallback
 
 
 if __name__ == "__main__":
