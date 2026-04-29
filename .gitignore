@@ -3,3 +3,21 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.env
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
