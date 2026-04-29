@@ -1,11 +1,16 @@
 from fastapi import FastAPI
 
+from app.middleware.auth import APIKeyAuthMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
 from app.routes.applications import router as applications_router
 from app.routes.cover_letter import router as cover_letter_router
 from app.routes.match import router as match_router
 from app.routes.tailor import router as tailor_router
 
 app = FastAPI()
+
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(APIKeyAuthMiddleware)
 
 app.include_router(match_router)
 app.include_router(tailor_router)
