@@ -1,4 +1,5 @@
 # AI Job Application Agent
+> AI-powered backend system that automates job matching, resume tailoring, and application tracking in a single workflow.
 
 ## 🚀 Problem Statement
 Job applications are repetitive and time-consuming.  
@@ -14,6 +15,12 @@ This project automates and strengthens the application workflow by:
 
 ## 🏗️ Architecture
 `User Input → Matcher → Threshold → LLM → Validation → Output`
+
+## Key Highlights
+- Clean layered architecture (routes → services → schemas)
+- AI integration with controlled, normalized outputs
+- Production-style REST API with pagination and validation
+- System map for fast code navigation (agent-friendly design)
 
 ## ⚙️ Features
 - Resume–JD matching engine (custom scoring)
