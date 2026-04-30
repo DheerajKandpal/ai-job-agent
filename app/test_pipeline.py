@@ -16,11 +16,12 @@ from app.services.matcher.matcher import match_resume_to_job
 from app.services.llm.ollama_client import generate_tailored_resume
 from app.services.validation.threshold import passes_threshold
 from app.services.llm.cover_letter import generate_cover_letter
+from app.core.config import settings
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-RESUME_VERSION = "base_v2"
+RESUME_VERSION = settings.RESUME_VERSION
 
 JOB_DESCRIPTION = """
 Looking for a Data Analyst with SQL, Python, Power BI and ETL pipeline experience.

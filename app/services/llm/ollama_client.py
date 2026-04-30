@@ -1,5 +1,17 @@
 import json
+import os
 import subprocess
+
+from app.core.config import settings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+def _ollama_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["OLLAMA_HOST"] = settings.OLLAMA_BASE_URL
+    return env
 
 
 def _extract_json_block(text: str) -> str | None:
@@ -129,7 +141,7 @@ Behavior rules:
 
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
     if debug:
-        print(f"Final prompt sent to model:\n{full_prompt}")
+        logger.debug("final prompt prepared for tailor_resume")
 
     safe_fallback = {
         "summary": "",
@@ -186,39 +198,42 @@ Behavior rules:
     def _finalize_output(payload) -> dict:
         final_output = _sanitize_parsed_output(payload)
         if debug:
-            print(f"Final sanitized result: {final_output}")
+            logger.debug("final sanitized result ready")
         return final_output
 
     sanitized_fallback = _finalize_output(safe_fallback)
 
+    logger.info("llm call start: tailor_resume")
     try:
         result = subprocess.run(
-            ["ollama", "run", "qwen2.5-coder"],
+            ["ollama", "run", settings.MODEL_NAME],
             input=full_prompt,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=settings.LLM_TIMEOUT,
+            env=_ollama_env(),
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        print(f"Ollama subprocess timed out and was killed: {exc}")
+        logger.error("llm call error: tailor_resume timeout (%s)", exc)
         return sanitized_fallback
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        logger.error("llm call error: tailor_resume (%s)", exc)
         return sanitized_fallback
 
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
 
     if stderr:
-        print(f"Ollama stderr: {stderr}")
+        logger.error("llm stderr: tailor_resume")
 
     if result.returncode != 0 or not stdout:
-        print(f"Ollama subprocess failed with return code {result.returncode}")
+        logger.error("llm call error: tailor_resume (code=%s)", result.returncode)
         return sanitized_fallback
 
     raw_output = stdout.strip()
     if debug:
-        print(f"Raw output (first response): {raw_output}")
+        logger.debug("raw output received for tailor_resume")
     if not raw_output:
         return sanitized_fallback
 
@@ -226,6 +241,7 @@ Behavior rules:
 
     try:
         parsed_output = json.loads(raw_output)
+        logger.info("llm call end: tailor_resume")
         return _finalize_output(parsed_output)
     except json.JSONDecodeError:
         correction_prompt = (
@@ -239,34 +255,36 @@ Behavior rules:
 
         try:
             retry_result = subprocess.run(
-                ["ollama", "run", "qwen2.5-coder"],
+                ["ollama", "run", settings.MODEL_NAME],
                 input=correction_prompt,
                 text=True,
                 capture_output=True,
-                timeout=30,
+                timeout=settings.LLM_TIMEOUT,
+                env=_ollama_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            print(f"Ollama correction subprocess timed out and was killed: {exc}")
+            logger.error("llm correction error: tailor_resume timeout (%s)", exc)
             return sanitized_fallback
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            logger.error("llm correction error: tailor_resume (%s)", exc)
             return sanitized_fallback
 
         retry_stdout = (retry_result.stdout or "").strip()
         retry_stderr = (retry_result.stderr or "").strip()
 
         if retry_stderr:
-            print(f"Ollama correction stderr: {retry_stderr}")
+            logger.error("llm correction stderr: tailor_resume")
 
         if retry_result.returncode != 0 or not retry_stdout:
-            print(
-                f"Ollama correction subprocess failed with return code {retry_result.returncode}"
+            logger.error(
+                "llm correction error: tailor_resume (code=%s)", retry_result.returncode
             )
             return sanitized_fallback
 
         retry_raw_output = retry_stdout.strip()
         if debug:
-            print(f"Retry output: {retry_raw_output}")
+            logger.debug("retry output received for tailor_resume")
         if not retry_raw_output:
             return sanitized_fallback
 
@@ -274,6 +292,7 @@ Behavior rules:
 
         try:
             retry_parsed_output = json.loads(retry_raw_output)
+            logger.info("llm call end: tailor_resume")
             return _finalize_output(retry_parsed_output)
         except json.JSONDecodeError:
             return sanitized_fallback
@@ -301,4 +320,4 @@ Looking for a Data Analyst with strong SQL skills and dashboard-building experie
 """
 
     tailored = generate_tailored_resume(resume, job_description)
-    print(json.dumps(tailored, indent=2))
+    logger.info("tailor smoke test result: %s", json.dumps(tailored, indent=2))

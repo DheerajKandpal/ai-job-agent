@@ -1,23 +1,71 @@
-venv/
-__pycache__/
-*.pyc
-.env
-.DS_Store
-
+# =========================
 # Python
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
 
-# Virtual env
+# =========================
+# Virtual environments
+# =========================
 venv/
+.venv/
+env/
+ENV/
+
+# =========================
+# Environment / secrets
+# =========================
 .env
+.env.streamlit
+*.env
 
-# Mac
+# =========================
+# Distribution / packaging
+# =========================
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# =========================
+# Testing
+# =========================
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# =========================
+# Logs
+# =========================
+*.log
+auto_apply/job_logs.jsonl
+
+# =========================
+# macOS
+# =========================
 .DS_Store
+.AppleDouble
+.LSOverride
 
-# IDE
+# =========================
+# IDEs
+# =========================
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Logs
-*.log
+# =========================
+# Misc
+# =========================
+*.pyc
+*.pdb

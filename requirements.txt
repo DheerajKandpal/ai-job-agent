@@ -1,0 +1,32 @@
+# =========================
+# Web framework
+# =========================
+fastapi==0.136.1
+uvicorn==0.46.0
+gunicorn==25.3.0
+
+# =========================
+# Database
+# =========================
+psycopg2-binary==2.9.12
+
+# =========================
+# HTTP client
+# =========================
+requests==2.33.1
+
+# =========================
+# Config / environment
+# =========================
+python-dotenv==1.2.2
+
+# =========================
+# Testing
+# =========================
+hypothesis==6.152.4
+pytest==9.0.3
+
+# =========================
+# UI (installed separately by setup.sh)
+# =========================
+# streamlit is installed via setup.sh to keep it out of the core API deps
