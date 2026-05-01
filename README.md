@@ -1,83 +1,115 @@
-# AI Job Application Agent
+# 🚀 AI Job Application Agent
 
-End-to-end AI system that automates job applications — from job description → match scoring → tailored resume → cover letter → tracked in PostgreSQL.
-
----
-
-## What It Does
-
-Give it a job description and it will:
-
-- Score your fit (match score + matched/missing skills)
-- Generate a tailored resume via LLM
-- Generate a personalized cover letter via LLM
-- Store the full application in PostgreSQL
-- Run automatically on a schedule (cron / automation runner)
-- Auto-apply to jobs via email or HTTP endpoint (auto-apply pipeline)
+> Autonomous AI system that **discovers jobs, tailors resumes, generates cover letters, and applies automatically — end-to-end.**
 
 ---
 
-## Architecture
+## 🔥 What Makes This Different
 
+Most projects stop at:
+
+* resume generation ❌
+* job matching ❌
+
+This system does:
+
+✔ Job discovery (API + scraping)
+✔ AI-based filtering (match scoring)
+✔ Resume tailoring (LLM)
+✔ Cover letter generation
+✔ **Auto-apply (email + endpoint)**
+✔ Application tracking (PostgreSQL)
+
+👉 **End-to-end automation, not just components**
+
+---
+
+## ⚡ 30-Second Demo Flow
+
+```text
+Internet Jobs
+     ↓
+Filter (AI Match Score)
+     ↓
+Tailored Resume + Cover Letter
+     ↓
+Auto Apply (Email / Endpoint)
+     ↓
+Track Applications
 ```
-[Streamlit UI / CLI / Cron]
-         |
-         v
-   [FastAPI Backend]
-         |
-    +----+----+
-    |         |
-    v         v
-[PostgreSQL] [Ollama LLM]
+
+---
+
+## 🎯 Why This Matters
+
+Applying manually is:
+
+* repetitive
+* inconsistent
+* time-consuming
+
+This system converts it into:
+
+> **a scalable, automated pipeline with AI decision-making**
+
+---
+
+## 🧠 Key Engineering Decisions
+
+* **No ORM** → direct SQL for control & performance
+* **Local LLM (Ollama)** → privacy + zero API cost
+* **Hybrid job sourcing** → power + safety balance
+* **Controlled automation** → avoids platform bans
+
+---
+
+## 🏗️ Architecture (Simplified)
+
+```text
+[Streamlit UI / CLI / Scheduler]
+            ↓
+       [FastAPI]
+      /         \
+[PostgreSQL]   [LLM]
+      ↓
+ [Auto Apply Engine]
 ```
 
-**Modules:**
+---
 
-| Module | Purpose |
-|---|---|
-| `app/` | FastAPI backend — routes, services, middleware, config |
-| `app/services/matcher/` | Skill-based resume-to-job match scoring |
-| `app/services/tracker/` | PostgreSQL persistence (resumes, applications) |
-| `app/services/llm/` | Ollama LLM client for resume tailoring and cover letters |
-| `auto_apply/` | Autonomous job application pipeline (score → tailor → send) |
-| `automation/` | Cron scheduler and automation runner |
-| `streamlit_app.py` | Streamlit UI frontend |
-| `run_pipeline.py` | CLI pipeline runner (no UI required) |
+## 📸 Screenshots (Add later)
+
+* [ ] Job processing UI
+* [ ] Generated resume
+* [ ] Dashboard
+* [ ] Application list
 
 ---
 
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `POST` | `/match` | Score resume against job description |
-| `POST` | `/tailor` | Generate tailored resume |
-| `POST` | `/cover-letter` | Generate cover letter |
-| `GET` | `/applications/` | List applications (paginated) |
-| `POST` | `/applications/` | Save a new application |
-| `GET` | `/applications/{id}` | Get application by ID |
-| `PATCH` | `/applications/{id}` | Update application status |
-
-All routes (except `/` and `/health`) require `Authorization: Bearer <API_KEY>`.
-
----
-
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
-# 1. Create venv, install deps, copy .env.example → .env
 make setup
-
-# 2. Edit .env with real values (DB, API key, Ollama URL)
-nano .env
-
-# 3. Start FastAPI + Streamlit
 make run
 ```
 
-- API → http://127.0.0.1:8000
-- UI  → http://127.0.0.1:8501
+* API → http://127.0.0.1:8000
+* UI  → http://127.0.0.1:8501
+
+---
+
+## ⚠️ Reality Note
+
+This system is designed for:
+
+* **high-volume intelligent applications**
+
+Not:
+
+* blind mass spam
+
+---
+
 
 ---
 
