@@ -69,3 +69,30 @@ auto_apply/job_logs.jsonl
 # =========================
 *.pyc
 *.pdb
+# =========================
+# App-specific (IMPORTANT)
+# =========================
+
+# Runner output
+run_results.json
+
+# Local databases
+*.sqlite3
+*.db
+
+# Data files
+*.csv
+*.xlsx
+*.jsonl
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Cache / temp
+.cache/
+tmp/
+temp/
+
+resume.txt
+.kiro/
+run_results.json

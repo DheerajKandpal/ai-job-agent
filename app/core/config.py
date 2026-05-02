@@ -1,8 +1,10 @@
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always load from the project root regardless of working directory
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 
 class Settings:

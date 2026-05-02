@@ -216,10 +216,10 @@ Behavior rules:
         )
     except subprocess.TimeoutExpired as exc:
         logger.error("llm call error: tailor_resume timeout (%s)", exc)
-        return sanitized_fallback
+        raise RuntimeError("LLM call timed out") from exc
     except (OSError, ValueError) as exc:
         logger.error("llm call error: tailor_resume (%s)", exc)
-        return sanitized_fallback
+        raise RuntimeError(f"LLM service unavailable: {exc}") from exc
 
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
@@ -229,13 +229,13 @@ Behavior rules:
 
     if result.returncode != 0 or not stdout:
         logger.error("llm call error: tailor_resume (code=%s)", result.returncode)
-        return sanitized_fallback
+        raise RuntimeError(f"LLM call failed (code={result.returncode})")
 
     raw_output = stdout.strip()
     if debug:
         logger.debug("raw output received for tailor_resume")
     if not raw_output:
-        return sanitized_fallback
+        raise RuntimeError("LLM returned empty output")
 
     raw_output = _extract_json_guard(raw_output)
 
@@ -265,10 +265,10 @@ Behavior rules:
             )
         except subprocess.TimeoutExpired as exc:
             logger.error("llm correction error: tailor_resume timeout (%s)", exc)
-            return sanitized_fallback
+            raise RuntimeError("LLM correction call timed out") from exc
         except (OSError, ValueError) as exc:
             logger.error("llm correction error: tailor_resume (%s)", exc)
-            return sanitized_fallback
+            raise RuntimeError(f"LLM correction service unavailable: {exc}") from exc
 
         retry_stdout = (retry_result.stdout or "").strip()
         retry_stderr = (retry_result.stderr or "").strip()
@@ -280,13 +280,13 @@ Behavior rules:
             logger.error(
                 "llm correction error: tailor_resume (code=%s)", retry_result.returncode
             )
-            return sanitized_fallback
+            raise RuntimeError(f"LLM correction call failed (code={retry_result.returncode})")
 
         retry_raw_output = retry_stdout.strip()
         if debug:
             logger.debug("retry output received for tailor_resume")
         if not retry_raw_output:
-            return sanitized_fallback
+            raise RuntimeError("LLM correction returned empty output")
 
         retry_raw_output = _extract_json_guard(retry_raw_output)
 
@@ -295,7 +295,7 @@ Behavior rules:
             logger.info("llm call end: tailor_resume")
             return _finalize_output(retry_parsed_output)
         except json.JSONDecodeError:
-            return sanitized_fallback
+            raise RuntimeError("LLM output could not be parsed as JSON after correction")
 
 
 if __name__ == "__main__":

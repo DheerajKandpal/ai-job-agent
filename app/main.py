@@ -3,7 +3,9 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger, reset_request_id, set_request_id
@@ -17,7 +19,41 @@ from app.services.tracker.db_service import check_database_connection, init_data
 
 configure_logging()
 
+API_KEY_NAME = "X-API-KEY"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
 app = FastAPI(title=settings.APP_NAME, debug=settings.DEBUG)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title="AI Job Agent API",
+        version="1.0.0",
+        description="API with API Key Authentication",
+        routes=app.routes,
+    )
+
+    openapi_schema.setdefault("components", {})["securitySchemes"] = {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-KEY",
+        }
+    }
+
+    # Apply security globally to all endpoints
+    for path in openapi_schema["paths"].values():
+        for method in path.values():
+            method["security"] = [{"ApiKeyAuth": []}]
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 logger = get_logger(__name__)
 
 app.add_middleware(RateLimitMiddleware)

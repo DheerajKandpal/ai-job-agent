@@ -1,21 +1,32 @@
+import json
 import os
 import requests
 import sys
+from collections import Counter
+from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load .env from project root (important fix)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 API_KEY = os.getenv("API_KEY")
 
 if not API_KEY:
-    print("Missing API_KEY")
-    exit()
+    raise RuntimeError("Missing API_KEY — check .env loading")
 
 headers = {
     "X-API-KEY": API_KEY,
     "Content-Type": "application/json",
 }
 
-THRESHOLD = float(os.getenv("MATCH_THRESHOLD", 0.5))
+# Decision tiers mirror app/services/match_service.py thresholds.
+# No threshold env var needed — the backend classifies for us.
+VALID_DECISIONS = {"HIGH", "MEDIUM", "LOW", "REJECT"}
 
 
 def call_api(url, payload, step_name, job_id):
@@ -138,18 +149,38 @@ input_jobs = sys.argv[1:]
 
 if input_jobs:
     jobs = [{"title": "CLI Job", "company": "", "job_description": input_jobs[0]}]
+else:
+    # Batch loop disabled — run only the first job to avoid excessive DB calls.
+    # Re-enable by removing the slice below once execution issues are resolved.
+    jobs = jobs[:1]
 
 success_count = 0
+results = []          # tracking: one entry per job processed
 
 for i, job in enumerate(jobs, 1):
     job_description = f"{job['title']} at {job['company']}\n\n{job['job_description']}"
 
+    # Tracking record — filled in as the job progresses
+    record = {
+        "job_id":    i,
+        "title":     job.get("title", ""),
+        "company":   job.get("company", ""),
+        "score":     None,
+        "decision":  None,
+        "status":    "failed",
+        "failed_at": None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
     print(f"\n[JOB {i}] START")
 
+    # ------------------------------------------------------------------
+    # MATCH
+    # ------------------------------------------------------------------
     print(f"[JOB {i}] match")
     match_response = call_api(
         f"{BASE_URL}/match",
-        {"job_description": job_description},  # adjust if needed
+        {"job_description": job_description},
         "match",
         i,
     )
@@ -157,6 +188,8 @@ for i, job in enumerate(jobs, 1):
         print(f"[JOB {i}] FAILED at match")
         if match_response is not None:
             print(match_response.text)
+        record["failed_at"] = "match"
+        results.append(record)
         continue
     try:
         match_data = match_response.json()
@@ -164,21 +197,44 @@ for i, job in enumerate(jobs, 1):
         print(f"[JOB {i}] INVALID JSON at match")
         print(match_response.text)
         print(f"[JOB {i}] FAILED at match")
+        record["failed_at"] = "match"
+        results.append(record)
         continue
-    score = match_data.get("score", 0)
-    if score < THRESHOLD:
-        print(f"[JOB {i}] SKIPPED (low match: {score})")
-        continue
-    print(f"[JOB {i}] MATCH SUCCESS")
-    print(match_data)
 
+    score    = match_data.get("match_score", 0.0)
+    decision = match_data.get("decision", "REJECT")
+    if decision not in VALID_DECISIONS:
+        decision = "REJECT"
+
+    record["score"]    = score
+    record["decision"] = decision
+
+    if decision == "HIGH":
+        print(f"[JOB {i}] HIGH MATCH (score={score}) — running full pipeline")
+    elif decision == "MEDIUM":
+        print(f"[JOB {i}] MEDIUM MATCH (score={score}) — running partial pipeline")
+    elif decision == "LOW":
+        print(f"[JOB {i}] LOW MATCH (score={score}) — minimal processing, logging only")
+        print(match_data)
+        record["status"] = "logged"
+        results.append(record)
+        continue
+    else:
+        print(f"[JOB {i}] REJECT (score={score}) — skipping")
+        record["status"] = "rejected"
+        results.append(record)
+        continue
+
+    # ------------------------------------------------------------------
+    # TAILOR  (HIGH + MEDIUM)
+    # ------------------------------------------------------------------
     print(f"[JOB {i}] tailor")
     tailor_response = call_api(
         f"{BASE_URL}/tailor",
         {
-            "job_description": job_description,  # adjust if needed
-            "resume": "your_resume_text",  # adjust if needed
-            "match": match_data,  # adjust if needed
+            "job_description": job_description,
+            "resume": "your_resume_text",
+            "match": match_data,
         },
         "tailor",
         i,
@@ -187,6 +243,8 @@ for i, job in enumerate(jobs, 1):
         print(f"[JOB {i}] FAILED at tailor")
         if tailor_response is not None:
             print(tailor_response.text)
+        record["failed_at"] = "tailor"
+        results.append(record)
         continue
     try:
         tailor_data = tailor_response.json()
@@ -194,44 +252,63 @@ for i, job in enumerate(jobs, 1):
         print(f"[JOB {i}] INVALID JSON at tailor")
         print(tailor_response.text)
         print(f"[JOB {i}] FAILED at tailor")
+        record["failed_at"] = "tailor"
+        results.append(record)
         continue
     print(f"[JOB {i}] TAILOR SUCCESS")
     print(tailor_data)
 
-    print(f"[JOB {i}] cover-letter")
-    cover_letter_response = call_api(
-        f"{BASE_URL}/cover-letter",
-        {
-            "job_description": job_description,  # adjust if needed
-            "resume": "your_resume_text",  # adjust if needed
-            "tailored_resume": tailor_data,  # adjust if needed
-        },
-        "cover-letter",
-        i,
-    )
-    if cover_letter_response is None or cover_letter_response.status_code != 200:
-        print(f"[JOB {i}] FAILED at cover-letter")
-        if cover_letter_response is not None:
-            print(cover_letter_response.text)
-        continue
-    try:
-        cover_letter_data = cover_letter_response.json()
-    except Exception:
-        print(f"[JOB {i}] INVALID JSON at cover-letter")
-        print(cover_letter_response.text)
-        print(f"[JOB {i}] FAILED at cover-letter")
-        continue
-    print(f"[JOB {i}] COVER-LETTER SUCCESS")
-    print(cover_letter_data)
+    # ------------------------------------------------------------------
+    # COVER LETTER  (HIGH required — MEDIUM optional)
+    # ------------------------------------------------------------------
+    cover_letter_data = None
+    if decision in ("HIGH", "MEDIUM"):
+        print(f"[JOB {i}] cover-letter")
+        cover_letter_response = call_api(
+            f"{BASE_URL}/cover-letter",
+            {
+                "job_description": job_description,
+                "resume": "your_resume_text",
+                "tailored_resume": tailor_data,
+            },
+            "cover-letter",
+            i,
+        )
+        if cover_letter_response is None or cover_letter_response.status_code != 200:
+            print(f"[JOB {i}] FAILED at cover-letter")
+            if cover_letter_response is not None:
+                print(cover_letter_response.text)
+            if decision == "HIGH":
+                record["failed_at"] = "cover-letter"
+                results.append(record)
+                continue
+            print(f"[JOB {i}] MEDIUM — continuing without cover letter")
+        else:
+            try:
+                cover_letter_data = cover_letter_response.json()
+                print(f"[JOB {i}] COVER-LETTER SUCCESS")
+                print(cover_letter_data)
+            except Exception:
+                print(f"[JOB {i}] INVALID JSON at cover-letter")
+                print(cover_letter_response.text)
+                if decision == "HIGH":
+                    print(f"[JOB {i}] FAILED at cover-letter")
+                    record["failed_at"] = "cover-letter"
+                    results.append(record)
+                    continue
+                print(f"[JOB {i}] MEDIUM — continuing without cover letter")
 
+    # ------------------------------------------------------------------
+    # APPLICATION  (HIGH + MEDIUM)
+    # ------------------------------------------------------------------
     print(f"[JOB {i}] applications")
     applications_response = call_api(
         f"{BASE_URL}/applications/",
         {
-            "job_description": job_description,  # adjust if needed
-            "match": match_data,  # adjust if needed
-            "tailored_resume": tailor_data,  # adjust if needed
-            "cover_letter": cover_letter_data,  # adjust if needed
+            "job_description": job_description,
+            "match": match_data,
+            "tailored_resume": tailor_data,
+            "cover_letter": cover_letter_data,
         },
         "applications",
         i,
@@ -240,6 +317,8 @@ for i, job in enumerate(jobs, 1):
         print(f"[JOB {i}] FAILED at applications")
         if applications_response is not None:
             print(applications_response.text)
+        record["failed_at"] = "applications"
+        results.append(record)
         continue
     try:
         applications_data = applications_response.json()
@@ -247,10 +326,34 @@ for i, job in enumerate(jobs, 1):
         print(f"[JOB {i}] INVALID JSON at applications")
         print(applications_response.text)
         print(f"[JOB {i}] FAILED at applications")
+        record["failed_at"] = "applications"
+        results.append(record)
         continue
+
     print(f"[JOB {i}] APPLICATIONS SUCCESS")
     print(applications_data)
+    record["status"] = "success"
+    results.append(record)
     success_count += 1
     print(f"[JOB {i}] COMPLETED SUCCESSFULLY")
 
 print(f"\nTOTAL SUCCESS: {success_count}/{len(jobs)}")
+
+# ------------------------------------------------------------------
+# Metrics summary
+# ------------------------------------------------------------------
+decision_counts = Counter(r["decision"] or "unknown" for r in results)
+status_counts   = Counter(r["status"] for r in results)
+
+print("\n--- Run Summary ---")
+print(f"Decision Distribution : {dict(decision_counts)}")
+print(f"Status Distribution   : {dict(status_counts)}")
+print(f"Total processed       : {len(results)}")
+
+# ------------------------------------------------------------------
+# Persist results to file
+# ------------------------------------------------------------------
+output_path = Path(__file__).resolve().parent.parent / "run_results.json"
+with open(output_path, "w") as f:
+    json.dump(results, f, indent=2)
+print(f"Results saved to      : {output_path}")

@@ -9,7 +9,9 @@ logger = get_logger(__name__)
 
 
 def process_tailor(job_description: str) -> dict:
-    if not job_description or not job_description.strip():
+    # Strip whitespace and non-printable characters (mirrors route-layer validation)
+    cleaned = "".join(c for c in (job_description or "").strip() if c.isprintable()).strip()
+    if not cleaned:
         raise ValueError("job_description cannot be empty")
 
     resume = cache_get("resume")
@@ -22,7 +24,7 @@ def process_tailor(job_description: str) -> dict:
     if resume is None:
         raise ValueError("resume not found")
 
-    tailored_resume = generate_tailored_resume(job_description, resume)
+    tailored_resume = generate_tailored_resume(resume, job_description)
 
     if isinstance(tailored_resume, dict):
         normalized_summary = str(tailored_resume.get("summary", ""))
