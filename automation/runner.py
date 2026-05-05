@@ -30,16 +30,26 @@ VALID_DECISIONS = {"HIGH", "MEDIUM", "LOW", "REJECT"}
 
 
 def call_api(url, payload, step_name, job_id):
+    # LLM endpoints can take up to 90s × 3 retries + overhead.
+    # Use a generous but finite timeout so the runner never hangs forever.
+    REQUEST_TIMEOUT = 310  # seconds
+
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+    except requests.Timeout:
+        print(f"[JOB {job_id}] {step_name.upper()} REQUEST TIMEOUT (>{REQUEST_TIMEOUT}s)")
+        return None
     except Exception as e:
         print(f"[JOB {job_id}] {step_name.upper()} NETWORK ERROR: {e}")
         return None
 
     if response.status_code >= 500:
-        print(f"[JOB {job_id}] {step_name.upper()} RETRYING (SERVER ERROR)")
+        print(f"[JOB {job_id}] {step_name.upper()} RETRYING (SERVER ERROR {response.status_code})")
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+        except requests.Timeout:
+            print(f"[JOB {job_id}] {step_name.upper()} RETRY TIMEOUT")
+            return None
         except Exception as e:
             print(f"[JOB {job_id}] {step_name.upper()} RETRY FAILED: {e}")
             return None
@@ -162,14 +172,15 @@ for i, job in enumerate(jobs, 1):
 
     # Tracking record — filled in as the job progresses
     record = {
-        "job_id":    i,
-        "title":     job.get("title", ""),
-        "company":   job.get("company", ""),
-        "score":     None,
-        "decision":  None,
-        "status":    "failed",
-        "failed_at": None,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "job_id":         i,
+        "title":          job.get("title", ""),
+        "company":        job.get("company", ""),
+        "score":          None,
+        "decision":       None,
+        "application_id": None,
+        "status":         "failed",
+        "failed_at":      None,
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
     }
 
     print(f"\n[JOB {i}] START")
@@ -231,11 +242,7 @@ for i, job in enumerate(jobs, 1):
     print(f"[JOB {i}] tailor")
     tailor_response = call_api(
         f"{BASE_URL}/tailor",
-        {
-            "job_description": job_description,
-            "resume": "your_resume_text",
-            "match": match_data,
-        },
+        {"job_description": job_description},
         "tailor",
         i,
     )
@@ -261,16 +268,14 @@ for i, job in enumerate(jobs, 1):
     # ------------------------------------------------------------------
     # COVER LETTER  (HIGH required — MEDIUM optional)
     # ------------------------------------------------------------------
-    cover_letter_data = None
+    # cover_letter_text holds the plain string extracted from the response,
+    # or None if the step was skipped / failed on a MEDIUM decision.
+    cover_letter_text = None
     if decision in ("HIGH", "MEDIUM"):
         print(f"[JOB {i}] cover-letter")
         cover_letter_response = call_api(
             f"{BASE_URL}/cover-letter",
-            {
-                "job_description": job_description,
-                "resume": "your_resume_text",
-                "tailored_resume": tailor_data,
-            },
+            {"job_description": job_description},
             "cover-letter",
             i,
         )
@@ -285,9 +290,11 @@ for i, job in enumerate(jobs, 1):
             print(f"[JOB {i}] MEDIUM — continuing without cover letter")
         else:
             try:
-                cover_letter_data = cover_letter_response.json()
+                cover_letter_resp_data = cover_letter_response.json()
+                # Extract the plain string from {"cover_letter": "..."}
+                cover_letter_text = cover_letter_resp_data.get("cover_letter") or None
                 print(f"[JOB {i}] COVER-LETTER SUCCESS")
-                print(cover_letter_data)
+                print(cover_letter_text)
             except Exception:
                 print(f"[JOB {i}] INVALID JSON at cover-letter")
                 print(cover_letter_response.text)
@@ -300,21 +307,37 @@ for i, job in enumerate(jobs, 1):
 
     # ------------------------------------------------------------------
     # APPLICATION  (HIGH + MEDIUM)
+    #
+    # Required fields:  job_title, company, job_description
+    # Optional fields:  match_score, resume_version, cover_letter
+    #
+    # match_score   — float extracted from match response
+    # resume_version — fixed tag "auto_v1" (no full resume text sent)
+    # cover_letter  — plain string extracted from cover-letter response
     # ------------------------------------------------------------------
-    print(f"[JOB {i}] applications")
+    job_title = job.get("title") or "Unknown"
+    company   = job.get("company") or "Unknown"
+
+    applications_payload = {
+        "job_title":       job_title,
+        "company":         company,
+        "job_description": job_description,
+        "match_score":     score,
+        "resume_version":  "auto_v1",
+        "cover_letter":    cover_letter_text,
+    }
+
+    print(f"[JOB {i}] applications — payload:")
+    print(json.dumps(applications_payload, indent=2))
+
     applications_response = call_api(
         f"{BASE_URL}/applications/",
-        {
-            "job_description": job_description,
-            "match": match_data,
-            "tailored_resume": tailor_data,
-            "cover_letter": cover_letter_data,
-        },
+        applications_payload,
         "applications",
         i,
     )
     if applications_response is None or applications_response.status_code != 200:
-        print(f"[JOB {i}] FAILED at applications")
+        print(f"[JOB {i}] FAILED at applications (HTTP {getattr(applications_response, 'status_code', 'N/A')})")
         if applications_response is not None:
             print(applications_response.text)
         record["failed_at"] = "applications"
@@ -330,8 +353,9 @@ for i, job in enumerate(jobs, 1):
         results.append(record)
         continue
 
-    print(f"[JOB {i}] APPLICATIONS SUCCESS")
-    print(applications_data)
+    print(f"[JOB {i}] APPLICATIONS SUCCESS — response:")
+    print(json.dumps(applications_data, indent=2))
+    record["application_id"] = applications_data.get("id")
     record["status"] = "success"
     results.append(record)
     success_count += 1

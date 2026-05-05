@@ -80,6 +80,78 @@ CREATE INDEX IF NOT EXISTS idx_application_logs_created_at ON application_logs(c
 SCHEMA_VERSION = 1
 SCHEMA_DESCRIPTION = "initial schema for resumes, applications, and application_logs"
 
+# ---------------------------------------------------------------------------
+# Migration v2 — applied by _apply_migrations() at startup.
+#
+# Background: the live applications table was created with an older schema
+# that has `tailored_resume_path` instead of `resume_version`, a wrong
+# status default ('generated'), and no status CHECK constraint.
+#
+# Rules:
+#   - Every step uses IF NOT EXISTS / DO NOTHING / DO UPDATE so the
+#     migration is fully idempotent — safe to run on every startup.
+#   - No existing columns are dropped; tailored_resume_path is preserved.
+#   - Existing rows whose status is not in the allowed set are normalised
+#     to 'applied' before the CHECK constraint is added.
+# ---------------------------------------------------------------------------
+_MIGRATION_V2_SQL = [
+    # 1. Add resume_version if it does not already exist.
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS resume_version TEXT;
+    """,
+
+    # 2. Backfill resume_version from tailored_resume_path for rows where
+    #    resume_version is still NULL and tailored_resume_path has a value.
+    #    Idempotent: only touches rows where resume_version IS NULL.
+    """
+    UPDATE applications
+    SET resume_version = tailored_resume_path
+    WHERE resume_version IS NULL
+      AND tailored_resume_path IS NOT NULL;
+    """,
+
+    # 3. Fix the status default so new rows land on 'applied', not 'generated'.
+    #    ALTER COLUMN … SET DEFAULT is idempotent (re-running it is harmless).
+    """
+    ALTER TABLE applications
+        ALTER COLUMN status SET DEFAULT 'applied';
+    """,
+
+    # 4. Normalise any existing rows whose status value is outside the allowed
+    #    set so the CHECK constraint below can be added without error.
+    #    Idempotent: WHERE clause limits updates to only out-of-range values.
+    """
+    UPDATE applications
+    SET status = 'applied'
+    WHERE status NOT IN ('applied', 'interview', 'rejected');
+    """,
+
+    # 5. Add the status CHECK constraint if it does not already exist.
+    #    DO NOTHING makes this idempotent.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'applications'::regclass
+              AND conname   = 'applications_status_check'
+        ) THEN
+            ALTER TABLE applications
+                ADD CONSTRAINT applications_status_check
+                CHECK (status IN ('applied', 'interview', 'rejected'));
+        END IF;
+    END;
+    $$;
+    """,
+]
+
+_MIGRATION_V2_VERSION = 2
+_MIGRATION_V2_DESCRIPTION = (
+    "add resume_version, backfill from tailored_resume_path, "
+    "fix status default and add status CHECK constraint"
+)
+
 
 def _get_connection():
     """Open and return a psycopg2 connection using environment variables."""
@@ -139,6 +211,76 @@ def init_database() -> None:
             extra={"error": str(exc), "schema_version": SCHEMA_VERSION},
         )
         raise RuntimeError("Database schema initialization failed during startup") from exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+    # Apply incremental migrations after the baseline schema is in place.
+    _apply_migrations()
+
+
+def _apply_migrations() -> None:
+    """
+    Apply incremental schema migrations in version order.
+
+    Each migration is recorded in schema_migrations so it runs exactly once.
+    Every SQL statement within a migration is idempotent, so re-running the
+    function on a database that already has the migration applied is safe.
+    """
+    migrations = [
+        (_MIGRATION_V2_VERSION, _MIGRATION_V2_DESCRIPTION, _MIGRATION_V2_SQL),
+    ]
+
+    conn = None
+    try:
+        conn = _get_connection()
+        for version, description, statements in migrations:
+            with conn.cursor() as cur:
+                # Check whether this migration has already been recorded.
+                cur.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = %s",
+                    (version,),
+                )
+                already_applied = cur.fetchone() is not None
+
+            if already_applied:
+                logger.info(
+                    "db migration already applied",
+                    extra={"migration_version": version},
+                )
+                continue
+
+            logger.info(
+                "db migration start",
+                extra={"migration_version": version, "description": description},
+            )
+            try:
+                with conn.cursor() as cur:
+                    for sql in statements:
+                        cur.execute(sql)
+                    cur.execute(
+                        """
+                        INSERT INTO schema_migrations (version, description)
+                        VALUES (%s, %s)
+                        ON CONFLICT (version) DO NOTHING
+                        """,
+                        (version, description),
+                    )
+                conn.commit()
+                logger.info(
+                    "db migration complete",
+                    extra={"migration_version": version},
+                )
+            except psycopg2.Error as exc:
+                conn.rollback()
+                logger.error(
+                    "db migration failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                    extra={"error": str(exc), "migration_version": version},
+                )
+                raise RuntimeError(
+                    f"Database migration v{version} failed during startup"
+                ) from exc
     finally:
         if conn is not None:
             conn.close()

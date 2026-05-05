@@ -1,12 +1,41 @@
+"""
+ollama_client.py
+----------------
+Subprocess-based Ollama client for resume tailoring.
+
+Reliability contract
+--------------------
+- generate_tailored_resume() NEVER raises.  On any failure it returns the
+  original resume fields with a [LLM_FAILED_FALLBACK] tag so the API always
+  returns HTTP 200.
+- _run_ollama() retries up to LLM_MAX_RETRIES times on timeout only, with a
+  short delay between attempts.  All other errors fail immediately.
+- Every call logs: start time, end time, duration, attempt number, and
+  success/failure outcome.
+"""
+
 import json
 import os
 import subprocess
+import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Maximum number of retry attempts on timeout (1 initial + 2 retries = 3 total).
+LLM_MAX_RETRIES = 2
+# Seconds to wait between retry attempts.
+LLM_RETRY_DELAY = 2
+
+# Fallback tag appended to the summary when the LLM could not be reached.
+_FALLBACK_TAG = "[LLM_FAILED_FALLBACK]"
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _ollama_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -51,9 +80,264 @@ def _collect_skills(payload) -> set[str]:
     return skills
 
 
+def _extract_json_guard(text: str) -> str:
+    """Strip any leading/trailing non-JSON text around the first {...} block."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    first_open = cleaned.find("{")
+    last_close = cleaned.rfind("}")
+    if first_open != -1 and last_close != -1 and first_open <= last_close:
+        return cleaned[first_open : last_close + 1].strip()
+    return cleaned
+
+
+def _run_ollama(prompt: str, call_label: str) -> str:
+    """
+    Run ``ollama run <model>`` with the given prompt and return stdout.
+
+    Retries up to LLM_MAX_RETRIES times on timeout.  All other subprocess
+    errors are raised immediately as RuntimeError.
+
+    Parameters
+    ----------
+    prompt      : Full prompt string piped to stdin.
+    call_label  : Short label used in log messages (e.g. "tailor_resume").
+
+    Returns
+    -------
+    str  Raw stdout from the model (may be empty).
+
+    Raises
+    ------
+    RuntimeError  On non-recoverable subprocess failure or exhausted retries.
+    """
+    attempt = 0
+    last_exc: Exception | None = None
+
+    while attempt <= LLM_MAX_RETRIES:
+        attempt_label = f"attempt {attempt + 1}/{LLM_MAX_RETRIES + 1}"
+        t_start = time.monotonic()
+
+        logger.info(
+            "llm call start: %s (%s)",
+            call_label,
+            attempt_label,
+            extra={"llm_call": call_label, "attempt": attempt + 1},
+        )
+
+        try:
+            result = subprocess.run(
+                ["ollama", "run", settings.MODEL_NAME],
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=settings.LLM_TIMEOUT,
+                env=_ollama_env(),
+                check=False,
+            )
+
+            duration_ms = round((time.monotonic() - t_start) * 1000, 1)
+
+            stderr = (result.stderr or "").strip()
+            if stderr:
+                logger.warning(
+                    "llm stderr: %s (%s)",
+                    call_label,
+                    attempt_label,
+                    extra={"llm_call": call_label, "attempt": attempt + 1},
+                )
+
+            if result.returncode != 0:
+                logger.error(
+                    "llm call failed: %s returncode=%s duration_ms=%s (%s)",
+                    call_label,
+                    result.returncode,
+                    duration_ms,
+                    attempt_label,
+                    extra={
+                        "llm_call": call_label,
+                        "attempt": attempt + 1,
+                        "returncode": result.returncode,
+                        "duration_ms": duration_ms,
+                        "outcome": "error",
+                    },
+                )
+                raise RuntimeError(
+                    f"LLM call failed (returncode={result.returncode})"
+                )
+
+            stdout = (result.stdout or "").strip()
+            logger.info(
+                "llm call success: %s duration_ms=%s (%s)",
+                call_label,
+                duration_ms,
+                attempt_label,
+                extra={
+                    "llm_call": call_label,
+                    "attempt": attempt + 1,
+                    "duration_ms": duration_ms,
+                    "outcome": "success",
+                },
+            )
+            return stdout
+
+        except subprocess.TimeoutExpired as exc:
+            duration_ms = round((time.monotonic() - t_start) * 1000, 1)
+            last_exc = exc
+            logger.warning(
+                "llm call timeout: %s duration_ms=%s (%s)",
+                call_label,
+                duration_ms,
+                attempt_label,
+                extra={
+                    "llm_call": call_label,
+                    "attempt": attempt + 1,
+                    "duration_ms": duration_ms,
+                    "outcome": "timeout",
+                },
+            )
+            attempt += 1
+            if attempt <= LLM_MAX_RETRIES:
+                logger.info(
+                    "llm call retry: %s sleeping %ss before attempt %s",
+                    call_label,
+                    LLM_RETRY_DELAY,
+                    attempt + 1,
+                    extra={"llm_call": call_label, "retry_delay": LLM_RETRY_DELAY},
+                )
+                time.sleep(LLM_RETRY_DELAY)
+            continue
+
+        except (OSError, ValueError) as exc:
+            duration_ms = round((time.monotonic() - t_start) * 1000, 1)
+            logger.error(
+                "llm call error: %s %s duration_ms=%s (%s)",
+                call_label,
+                exc,
+                duration_ms,
+                attempt_label,
+                extra={
+                    "llm_call": call_label,
+                    "attempt": attempt + 1,
+                    "duration_ms": duration_ms,
+                    "outcome": "error",
+                },
+            )
+            raise RuntimeError(f"LLM service unavailable: {exc}") from exc
+
+        except Exception as exc:
+            # Final safety net — catch anything unexpected so callers can
+            # decide whether to fall back rather than crash.
+            duration_ms = round((time.monotonic() - t_start) * 1000, 1)
+            logger.error(
+                "llm call unexpected error: %s %s duration_ms=%s (%s)",
+                call_label,
+                exc,
+                duration_ms,
+                attempt_label,
+                extra={
+                    "llm_call": call_label,
+                    "attempt": attempt + 1,
+                    "duration_ms": duration_ms,
+                    "outcome": "error",
+                },
+            )
+            raise RuntimeError(f"LLM unexpected error: {exc}") from exc
+
+    # All retry attempts exhausted (only reachable via timeout path).
+    logger.error(
+        "llm call exhausted retries: %s after %s attempts",
+        call_label,
+        LLM_MAX_RETRIES + 1,
+        extra={
+            "llm_call": call_label,
+            "total_attempts": LLM_MAX_RETRIES + 1,
+            "outcome": "exhausted",
+        },
+    )
+    raise RuntimeError(
+        f"LLM call timed out after {LLM_MAX_RETRIES + 1} attempts"
+    ) from last_exc
+
+
+# ---------------------------------------------------------------------------
+# Output sanitisation helpers (unchanged from original)
+# ---------------------------------------------------------------------------
+
+def _sanitize_parsed_output(payload, safe_fallback: dict) -> dict:
+    if not isinstance(payload, dict):
+        return safe_fallback
+
+    summary = payload.get("summary", "")
+    if not isinstance(summary, str):
+        summary = ""
+
+    experience = payload.get("experience", [])
+    if not isinstance(experience, list):
+        experience = []
+
+    skills = payload.get("skills", [])
+    if not isinstance(skills, list):
+        skills = []
+
+    def sanitize_str_list(items: list) -> list[str]:
+        sanitized = []
+        for item in items:
+            if isinstance(item, str):
+                sanitized.append(item)
+            elif item is None:
+                continue
+            else:
+                try:
+                    sanitized.append(str(item))
+                except (TypeError, ValueError):
+                    continue
+        return sanitized
+
+    return {
+        "summary": summary,
+        "experience": sanitize_str_list(experience),
+        "skills": sanitize_str_list(skills),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def generate_tailored_resume(
     resume_json: dict, job_description: str, debug: bool = False
 ) -> dict:
+    """
+    Tailor *resume_json* for *job_description* using the local Ollama model.
+
+    Reliability guarantee
+    ---------------------
+    This function NEVER raises.  If the LLM is unavailable, times out, or
+    returns unparseable output, it returns the original resume fields with
+    ``[LLM_FAILED_FALLBACK]`` appended to the summary so callers always get
+    a usable dict and the API always returns HTTP 200.
+    """
+    # Build the fallback from the original resume so no data is lost.
+    original_summary = str(resume_json.get("summary", ""))
+    original_experience = list(resume_json.get("experience", []))
+    original_skills = list(resume_json.get("skills", []))
+
+    # Normalise experience entries to strings for the response schema.
+    def _entry_to_str(entry) -> str:
+        if isinstance(entry, dict):
+            return " ".join(str(v) for v in entry.values() if v)
+        return str(entry)
+
+    fallback_output = {
+        "summary": f"{original_summary} {_FALLBACK_TAG}".strip(),
+        "experience": [_entry_to_str(e) for e in original_experience],
+        "skills": [str(s) for s in original_skills if s],
+    }
+
+    safe_fallback = {"summary": "", "experience": [], "skills": []}
+
     resume_text = json.dumps(resume_json, ensure_ascii=True, indent=2)
 
     system_prompt = """
@@ -143,159 +427,74 @@ Behavior rules:
     if debug:
         logger.debug("final prompt prepared for tailor_resume")
 
-    safe_fallback = {
-        "summary": "",
-        "experience": [],
-        "skills": [],
-    }
-
-    def _sanitize_parsed_output(payload) -> dict:
-        if not isinstance(payload, dict):
-            return safe_fallback
-
-        summary = payload.get("summary", "")
-        if not isinstance(summary, str):
-            summary = ""
-
-        experience = payload.get("experience", [])
-        if not isinstance(experience, list):
-            experience = []
-
-        skills = payload.get("skills", [])
-        if not isinstance(skills, list):
-            skills = []
-
-        def sanitize_str_list(items: list) -> list[str]:
-            sanitized = []
-            for item in items:
-                if isinstance(item, str):
-                    sanitized.append(item)
-                elif item is None:
-                    continue
-                else:
-                    try:
-                        sanitized.append(str(item))
-                    except (TypeError, ValueError):
-                        continue
-            return sanitized
-
-        return {
-            "summary": summary,
-            "experience": sanitize_str_list(experience),
-            "skills": sanitize_str_list(skills),
-        }
-
-    def _extract_json_guard(text: str) -> str:
-        cleaned = (text or "").strip()
-        if not cleaned:
-            return ""
-        first_open = cleaned.find("{")
-        last_close = cleaned.rfind("}")
-        if first_open != -1 and last_close != -1 and first_open <= last_close:
-            return cleaned[first_open : last_close + 1].strip()
-        return cleaned
-
-    def _finalize_output(payload) -> dict:
-        final_output = _sanitize_parsed_output(payload)
-        if debug:
-            logger.debug("final sanitized result ready")
-        return final_output
-
-    sanitized_fallback = _finalize_output(safe_fallback)
-
-    logger.info("llm call start: tailor_resume")
+    # --- Attempt 1: primary LLM call ---
     try:
-        result = subprocess.run(
-            ["ollama", "run", settings.MODEL_NAME],
-            input=full_prompt,
-            text=True,
-            capture_output=True,
-            timeout=settings.LLM_TIMEOUT,
-            env=_ollama_env(),
-            check=False,
+        raw_output = _run_ollama(full_prompt, "tailor_resume")
+    except Exception as exc:
+        logger.error(
+            "llm unavailable: tailor_resume returning fallback (%s)", exc,
+            extra={"llm_call": "tailor_resume", "outcome": "fallback"},
         )
-    except subprocess.TimeoutExpired as exc:
-        logger.error("llm call error: tailor_resume timeout (%s)", exc)
-        raise RuntimeError("LLM call timed out") from exc
-    except (OSError, ValueError) as exc:
-        logger.error("llm call error: tailor_resume (%s)", exc)
-        raise RuntimeError(f"LLM service unavailable: {exc}") from exc
+        return fallback_output
 
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
-
-    if stderr:
-        logger.error("llm stderr: tailor_resume")
-
-    if result.returncode != 0 or not stdout:
-        logger.error("llm call error: tailor_resume (code=%s)", result.returncode)
-        raise RuntimeError(f"LLM call failed (code={result.returncode})")
-
-    raw_output = stdout.strip()
-    if debug:
-        logger.debug("raw output received for tailor_resume")
     if not raw_output:
-        raise RuntimeError("LLM returned empty output")
+        logger.error(
+            "llm empty output: tailor_resume returning fallback",
+            extra={"llm_call": "tailor_resume", "outcome": "fallback"},
+        )
+        return fallback_output
 
     raw_output = _extract_json_guard(raw_output)
 
     try:
         parsed_output = json.loads(raw_output)
-        logger.info("llm call end: tailor_resume")
-        return _finalize_output(parsed_output)
-    except json.JSONDecodeError:
-        correction_prompt = (
-            "STRICTLY FIX THIS OUTPUT.\n"
-            "Return ONLY valid JSON.\n"
-            "No explanation.\n"
-            "No markdown.\n"
-            "Response MUST start with '{' and end with '}'.\n\n"
-            f"{raw_output}"
-        )
-
-        try:
-            retry_result = subprocess.run(
-                ["ollama", "run", settings.MODEL_NAME],
-                input=correction_prompt,
-                text=True,
-                capture_output=True,
-                timeout=settings.LLM_TIMEOUT,
-                env=_ollama_env(),
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            logger.error("llm correction error: tailor_resume timeout (%s)", exc)
-            raise RuntimeError("LLM correction call timed out") from exc
-        except (OSError, ValueError) as exc:
-            logger.error("llm correction error: tailor_resume (%s)", exc)
-            raise RuntimeError(f"LLM correction service unavailable: {exc}") from exc
-
-        retry_stdout = (retry_result.stdout or "").strip()
-        retry_stderr = (retry_result.stderr or "").strip()
-
-        if retry_stderr:
-            logger.error("llm correction stderr: tailor_resume")
-
-        if retry_result.returncode != 0 or not retry_stdout:
-            logger.error(
-                "llm correction error: tailor_resume (code=%s)", retry_result.returncode
-            )
-            raise RuntimeError(f"LLM correction call failed (code={retry_result.returncode})")
-
-        retry_raw_output = retry_stdout.strip()
+        result = _sanitize_parsed_output(parsed_output, safe_fallback)
         if debug:
-            logger.debug("retry output received for tailor_resume")
-        if not retry_raw_output:
-            raise RuntimeError("LLM correction returned empty output")
+            logger.debug("tailor_resume parse success")
+        return result
+    except json.JSONDecodeError:
+        pass  # fall through to correction attempt
 
-        retry_raw_output = _extract_json_guard(retry_raw_output)
+    # --- Attempt 2: ask the model to fix its own malformed output ---
+    correction_prompt = (
+        "STRICTLY FIX THIS OUTPUT.\n"
+        "Return ONLY valid JSON.\n"
+        "No explanation.\n"
+        "No markdown.\n"
+        "Response MUST start with '{' and end with '}'.\n\n"
+        f"{raw_output}"
+    )
 
-        try:
-            retry_parsed_output = json.loads(retry_raw_output)
-            logger.info("llm call end: tailor_resume")
-            return _finalize_output(retry_parsed_output)
-        except json.JSONDecodeError:
-            raise RuntimeError("LLM output could not be parsed as JSON after correction")
+    try:
+        retry_raw = _run_ollama(correction_prompt, "tailor_resume_correction")
+    except Exception as exc:
+        logger.error(
+            "llm correction unavailable: tailor_resume returning fallback (%s)", exc,
+            extra={"llm_call": "tailor_resume_correction", "outcome": "fallback"},
+        )
+        return fallback_output
+
+    if not retry_raw:
+        logger.error(
+            "llm correction empty output: tailor_resume returning fallback",
+            extra={"llm_call": "tailor_resume_correction", "outcome": "fallback"},
+        )
+        return fallback_output
+
+    retry_raw = _extract_json_guard(retry_raw)
+
+    try:
+        retry_parsed = json.loads(retry_raw)
+        result = _sanitize_parsed_output(retry_parsed, safe_fallback)
+        if debug:
+            logger.debug("tailor_resume correction parse success")
+        return result
+    except json.JSONDecodeError:
+        logger.error(
+            "llm output unparseable after correction: tailor_resume returning fallback",
+            extra={"llm_call": "tailor_resume_correction", "outcome": "fallback"},
+        )
+        return fallback_output
 
 
 if __name__ == "__main__":
