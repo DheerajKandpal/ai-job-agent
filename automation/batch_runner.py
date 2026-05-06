@@ -6,20 +6,41 @@ structured report.
 
 Usage
 -----
-    python automation/batch_runner.py              # all 10 jobs, 3 workers
-    python automation/batch_runner.py --workers 5  # override concurrency
-    python automation/batch_runner.py --jobs 3     # run only first N jobs
+    python automation/batch_runner.py                          # all static jobs, 3 workers
+    python automation/batch_runner.py --workers 5              # override concurrency
+    python automation/batch_runner.py --jobs 3                 # run only first N jobs
+    python automation/batch_runner.py --source mock --jobs 10  # fetch 10 mock jobs
+    python automation/batch_runner.py --source mock            # fetch all mock jobs
+
+When --source is provided, jobs are fetched via job_ingestion.fetch_jobs(),
+filtered via job_filter.filter_jobs(), deduplicated, and then passed to the
+pipeline. When --source is NOT provided, the existing static JOBS list is
+used unchanged (backward-compatible behaviour).
+
+automation/runner.py is preserved as the rollback path and must not be modified.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import time
 from collections import Counter
 from pathlib import Path
 
 from automation.worker import process_jobs_batch
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger("automation.batch_runner")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # Job list (same as runner.py — single source of truth kept here)
@@ -142,7 +163,10 @@ def _print_report(results: list[dict], total_s: float) -> None:
     print()
 
     # Per-job table
-    header = f"{'ID':>3}  {'Title':<35} {'Company':<20} {'Decision':<8} {'Status':<10} {'Score':>6}  {'AppID':>6}  {'Time':>6}"
+    header = (
+        f"{'ID':>3}  {'Title':<35} {'Company':<20} {'Decision':<8} "
+        f"{'Status':<10} {'Score':>6}  {'AppID':>6}  {'Time':>6}"
+    )
     print(header)
     print("-" * len(header))
     for r in results:
@@ -153,12 +177,15 @@ def _print_report(results: list[dict], total_s: float) -> None:
         co     = (r["company"] or "")[:19]
         dec    = (r["decision"] or "-")[:8]
         status = r["status"][:10]
-        print(f"{r['job_id']:>3}  {title:<35} {co:<20} {dec:<8} {status:<10} {score:>6}  {app_id:>6}  {dur:>6}")
+        print(
+            f"{r['job_id']:>3}  {title:<35} {co:<20} {dec:<8} "
+            f"{status:<10} {score:>6}  {app_id:>6}  {dur:>6}"
+        )
 
     # Summary
     print()
-    status_counts   = Counter(r["status"]                    for r in results)
-    decision_counts = Counter((r["decision"] or "unknown")   for r in results)
+    status_counts   = Counter(r["status"]                  for r in results)
+    decision_counts = Counter((r["decision"] or "unknown") for r in results)
     print(f"  Status   : {dict(status_counts)}")
     print(f"  Decision : {dict(decision_counts)}")
 
@@ -168,9 +195,48 @@ def _print_report(results: list[dict], total_s: float) -> None:
         print()
         print("  FAILURES:")
         for r in failed:
-            print(f"    job {r['job_id']} ({r['title']}): failed_at={r['failed_at']}  error={r['error']}")
+            print(
+                f"    job {r['job_id']} ({r['title']}): "
+                f"failed_at={r['failed_at']}  error={r['error']}"
+            )
 
     print("=" * 70)
+
+
+# ---------------------------------------------------------------------------
+# Job loading — static path vs. ingestion path
+# ---------------------------------------------------------------------------
+
+def _load_jobs_from_source(source: str, limit: int | None) -> list[dict]:
+    """
+    Fetch jobs via job_ingestion → job_filter pipeline.
+
+    Returns a list of Job_Records ready for process_jobs_batch().
+    Returns an empty list if no jobs survive deduplication + filtering.
+    """
+    # Import here so the module is importable without side effects when
+    # --source is not used (avoids loading ingestion deps in static mode).
+    from automation.job_ingestion import fetch_jobs
+    from automation.job_filter import filter_jobs
+
+    fetch_limit = limit if limit is not None else 50  # sensible default cap
+
+    logger.info("[RUNNER] Fetching jobs from source '%s' (limit=%d)", source, fetch_limit)
+    raw_jobs = fetch_jobs([source], fetch_limit)
+    logger.info("[RUNNER] Fetched %d jobs from ingestion", len(raw_jobs))
+
+    if not raw_jobs:
+        logger.warning("[RUNNER] No jobs returned from source '%s' after deduplication", source)
+        return []
+
+    filtered_jobs = filter_jobs(raw_jobs)
+    logger.info("[RUNNER] %d jobs after filtering", len(filtered_jobs))
+
+    if not filtered_jobs:
+        logger.warning("[RUNNER] No jobs remain after filtering — skipping pipeline")
+        return []
+
+    return filtered_jobs
 
 
 # ---------------------------------------------------------------------------
@@ -179,18 +245,52 @@ def _print_report(results: list[dict], total_s: float) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parallel job batch runner")
-    parser.add_argument("--workers", type=int, default=3,
-                        help="Number of parallel worker threads (default: 3)")
-    parser.add_argument("--jobs", type=int, default=None,
-                        help="Process only the first N jobs (default: all)")
-    parser.add_argument("--stagger", type=float, default=0.5,
-                        help="Seconds between job submissions (default: 0.5)")
+    parser.add_argument(
+        "--workers", type=int, default=3,
+        help="Number of parallel worker threads (default: 3)",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=None,
+        help="Process only the first N jobs (default: all)",
+    )
+    parser.add_argument(
+        "--stagger", type=float, default=0.5,
+        help="Seconds between job submissions (default: 0.5)",
+    )
+    parser.add_argument(
+        "--source", type=str, default=None,
+        help=(
+            "Job source to fetch from (e.g. 'mock', 'linkedin', 'indeed'). "
+            "When provided, jobs are fetched via job_ingestion and filtered "
+            "via job_filter. When omitted, the static JOBS list is used."
+        ),
+    )
     args = parser.parse_args()
 
-    jobs = JOBS[: args.jobs] if args.jobs else JOBS
+    # ------------------------------------------------------------------
+    # Determine job list
+    # ------------------------------------------------------------------
+    if args.source:
+        # Ingestion path: fetch → filter → deduplicate → pipeline
+        jobs = _load_jobs_from_source(args.source, args.jobs)
+        if not jobs:
+            print(
+                f"[RUNNER] No jobs to process from source '{args.source}' "
+                "(all deduplicated or filtered). Exiting."
+            )
+            return
+        # --jobs already applied inside _load_jobs_from_source via fetch limit;
+        # apply again here as a hard cap in case filter returned more than requested.
+        if args.jobs:
+            jobs = jobs[: args.jobs]
+    else:
+        # Static path: backward-compatible, identical to original behaviour
+        jobs = JOBS[: args.jobs] if args.jobs else JOBS
 
-    print(f"Starting batch: {len(jobs)} jobs, {args.workers} workers, "
-          f"{args.stagger}s stagger")
+    print(
+        f"Starting batch: {len(jobs)} jobs, {args.workers} workers, "
+        f"{args.stagger}s stagger"
+    )
 
     t_start = time.monotonic()
     results = process_jobs_batch(jobs, max_workers=args.workers, stagger_seconds=args.stagger)
