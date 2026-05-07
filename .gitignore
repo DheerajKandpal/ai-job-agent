@@ -75,6 +75,10 @@ auto_apply/job_logs.jsonl
 
 # Runner output
 run_results.json
+automation/applied_jobs.json
+automation/metrics.json
+automation/rate_state.json
+automation/seen_jobs.json
 
 # Local databases
 *.sqlite3

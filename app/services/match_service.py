@@ -28,8 +28,8 @@ def classify_match(score: float) -> str:
 
 
 def process_match(job_description: str) -> dict:
-    # Strip whitespace and non-printable characters (mirrors route-layer validation)
-    cleaned = "".join(c for c in (job_description or "").strip() if c.isprintable()).strip()
+    # Service-level validation: reject only truly empty/whitespace payloads.
+    cleaned = (job_description or "").strip()
     if not cleaned:
         raise ValueError("job_description cannot be empty")
 
@@ -54,6 +54,8 @@ def process_match(job_description: str) -> dict:
 
     return {
         "match_score":    score,
+        "score":          score,
         "matched_skills": list(result.get("matched_skills", [])),
+        "missing_skills": list(result.get("missing_skills", [])),
         "decision":       decision,
     }

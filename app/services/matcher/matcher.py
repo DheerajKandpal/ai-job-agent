@@ -221,6 +221,13 @@ def match_resume_to_job(resume_json: dict, job_description: str) -> dict:
             resume_skills.append(norm)
             seen.add(norm)
 
+    if not resume_skills:
+        return {
+            "match_score": 0.0,
+            "matched_skills": [],
+            "missing_skills": [],
+        }
+
     matched_skills = extract_skills_from_jd(job_description, resume_skills)
     matched_set = set(matched_skills)
     missing_skills = [s for s in resume_skills if s not in matched_set]

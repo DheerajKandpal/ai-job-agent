@@ -314,28 +314,9 @@ def generate_tailored_resume(
 
     Reliability guarantee
     ---------------------
-    This function NEVER raises.  If the LLM is unavailable, times out, or
-    returns unparseable output, it returns the original resume fields with
-    ``[LLM_FAILED_FALLBACK]`` appended to the summary so callers always get
-    a usable dict and the API always returns HTTP 200.
+    This function returns sanitized JSON on success and raises RuntimeError on
+    hard failure paths (LLM unavailable, empty output, unparseable output).
     """
-    # Build the fallback from the original resume so no data is lost.
-    original_summary = str(resume_json.get("summary", ""))
-    original_experience = list(resume_json.get("experience", []))
-    original_skills = list(resume_json.get("skills", []))
-
-    # Normalise experience entries to strings for the response schema.
-    def _entry_to_str(entry) -> str:
-        if isinstance(entry, dict):
-            return " ".join(str(v) for v in entry.values() if v)
-        return str(entry)
-
-    fallback_output = {
-        "summary": f"{original_summary} {_FALLBACK_TAG}".strip(),
-        "experience": [_entry_to_str(e) for e in original_experience],
-        "skills": [str(s) for s in original_skills if s],
-    }
-
     safe_fallback = {"summary": "", "experience": [], "skills": []}
 
     resume_text = json.dumps(resume_json, ensure_ascii=True, indent=2)
@@ -431,18 +412,11 @@ Behavior rules:
     try:
         raw_output = _run_ollama(full_prompt, "tailor_resume")
     except Exception as exc:
-        logger.error(
-            "llm unavailable: tailor_resume returning fallback (%s)", exc,
-            extra={"llm_call": "tailor_resume", "outcome": "fallback"},
-        )
-        return fallback_output
+        logger.error("llm unavailable: tailor_resume raising (%s)", exc)
+        raise RuntimeError(f"LLM unavailable for tailor_resume: {exc}") from exc
 
     if not raw_output:
-        logger.error(
-            "llm empty output: tailor_resume returning fallback",
-            extra={"llm_call": "tailor_resume", "outcome": "fallback"},
-        )
-        return fallback_output
+        raise RuntimeError("LLM returned empty output for tailor_resume")
 
     raw_output = _extract_json_guard(raw_output)
 
@@ -468,18 +442,11 @@ Behavior rules:
     try:
         retry_raw = _run_ollama(correction_prompt, "tailor_resume_correction")
     except Exception as exc:
-        logger.error(
-            "llm correction unavailable: tailor_resume returning fallback (%s)", exc,
-            extra={"llm_call": "tailor_resume_correction", "outcome": "fallback"},
-        )
-        return fallback_output
+        logger.error("llm correction unavailable: tailor_resume raising (%s)", exc)
+        raise RuntimeError(f"LLM correction unavailable: {exc}") from exc
 
     if not retry_raw:
-        logger.error(
-            "llm correction empty output: tailor_resume returning fallback",
-            extra={"llm_call": "tailor_resume_correction", "outcome": "fallback"},
-        )
-        return fallback_output
+        raise RuntimeError("LLM correction returned empty output")
 
     retry_raw = _extract_json_guard(retry_raw)
 
@@ -490,11 +457,7 @@ Behavior rules:
             logger.debug("tailor_resume correction parse success")
         return result
     except json.JSONDecodeError:
-        logger.error(
-            "llm output unparseable after correction: tailor_resume returning fallback",
-            extra={"llm_call": "tailor_resume_correction", "outcome": "fallback"},
-        )
-        return fallback_output
+        raise RuntimeError("LLM output unparseable after correction")
 
 
 if __name__ == "__main__":

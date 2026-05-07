@@ -51,69 +51,75 @@ def score_text_against_jd(text: str, job_description: str, skills: list) -> floa
     return matched / len(jd_skills)
 
 
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
-print(f"[pipeline] Fetching resume '{RESUME_VERSION}' from database ...")
-resume = get_resume_by_version(RESUME_VERSION)
+def main() -> int:
+    # -----------------------------------------------------------------------
+    # Pipeline
+    # -----------------------------------------------------------------------
+    print(f"[pipeline] Fetching resume '{RESUME_VERSION}' from database ...")
+    resume = get_resume_by_version(RESUME_VERSION)
 
-if resume is None:
-    print(f"[pipeline] ERROR: Resume '{RESUME_VERSION}' not found or DB unavailable. Exiting.")
-    sys.exit(1)
+    if resume is None:
+        print(f"[pipeline] ERROR: Resume '{RESUME_VERSION}' not found or DB unavailable. Exiting.")
+        return 1
 
-print(f"[pipeline] Resume loaded. Running matcher ...\n")
+    print("[pipeline] Resume loaded. Running matcher ...\n")
 
-result = match_resume_to_job(resume, JOB_DESCRIPTION)
+    result = match_resume_to_job(resume, JOB_DESCRIPTION)
 
-if not passes_threshold(result["match_score"]):
-    print("[PIPELINE] Rejected: below threshold")
-    sys.exit(0)
+    if not passes_threshold(result["match_score"]):
+        print("[PIPELINE] Rejected: below threshold")
+        return 0
 
-tailored_resume = generate_tailored_resume(resume, JOB_DESCRIPTION)
-tailored_result = match_resume_to_job(tailored_resume, JOB_DESCRIPTION)
+    tailored_resume = generate_tailored_resume(resume, JOB_DESCRIPTION)
+    tailored_result = match_resume_to_job(tailored_resume, JOB_DESCRIPTION)
 
-if not passes_threshold(tailored_result["match_score"]):
-    print("[PIPELINE] Tailored resume rejected: below 5% match threshold")
-    print("[PIPELINE] Falling back to original resume")
-    final_resume = resume
-else:
-    print("[PIPELINE] Tailored resume accepted")
-    final_resume = tailored_resume
+    if not passes_threshold(tailored_result["match_score"]):
+        print("[PIPELINE] Tailored resume rejected: below 5% match threshold")
+        print("[PIPELINE] Falling back to original resume")
+        final_resume = resume
+    else:
+        print("[PIPELINE] Tailored resume accepted")
+        final_resume = tailored_resume
 
-cover_letter = generate_cover_letter(final_resume, JOB_DESCRIPTION)
-cover_score = score_text_against_jd(
-    cover_letter,
-    JOB_DESCRIPTION,
-    final_resume.get("skills", []),
-)
+    cover_letter = generate_cover_letter(final_resume, JOB_DESCRIPTION)
+    cover_score = score_text_against_jd(
+        cover_letter,
+        JOB_DESCRIPTION,
+        final_resume.get("skills", []),
+    )
 
-if not passes_threshold(cover_score):
-    print("[PIPELINE] Cover letter rejected (low alignment)")
-    cover_letter = ""
-else:
-    print("[PIPELINE] Cover letter accepted")
+    if not passes_threshold(cover_score):
+        print("[PIPELINE] Cover letter rejected (low alignment)")
+        cover_letter = ""
+    else:
+        print("[PIPELINE] Cover letter accepted")
 
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
-print("\n--- MATCH RESULT ---")
-print(f"Score: {result['match_score']}")
-print(f"Matched: {result['matched_skills']}")
-print(f"Missing: {result['missing_skills']}")
+    # -----------------------------------------------------------------------
+    # Output
+    # -----------------------------------------------------------------------
+    print("\n--- MATCH RESULT ---")
+    print(f"Score: {result['match_score']}")
+    print(f"Matched: {result['matched_skills']}")
+    print(f"Missing: {result['missing_skills']}")
 
-print("\n--- TAILORED RESUME ---")
-print(json.dumps(tailored_resume, indent=2))
+    print("\n--- TAILORED RESUME ---")
+    print(json.dumps(tailored_resume, indent=2))
 
-if tailored_resume == resume:
-    print("[LLM] No changes or rejected due to safety")
+    if tailored_resume == resume:
+        print("[LLM] No changes or rejected due to safety")
 
-print("\n--- FINAL VALIDATION ---")
-print(f"Original Score : {result['match_score']}")
-print(f"Tailored Score : {tailored_result['match_score']}")
-print(f"Cover Letter Score : {cover_score}")
+    print("\n--- FINAL VALIDATION ---")
+    print(f"Original Score : {result['match_score']}")
+    print(f"Tailored Score : {tailored_result['match_score']}")
+    print(f"Cover Letter Score : {cover_score}")
 
-print("\n--- FINAL RESUME USED ---")
-print(json.dumps(final_resume, indent=2))
+    print("\n--- FINAL RESUME USED ---")
+    print(json.dumps(final_resume, indent=2))
 
-print("\n--- COVER LETTER ---")
-print(cover_letter if cover_letter else "[EMPTY / REJECTED]")
+    print("\n--- COVER LETTER ---")
+    print(cover_letter if cover_letter else "[EMPTY / REJECTED]")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
