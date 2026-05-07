@@ -232,8 +232,8 @@ class MockAdapter:
         },
         {
             "id": "mock-008",
-            "title": "Junior Data Analyst",
-            "company": "Analytics Inc",
+            "title": "Junior BI Analyst",
+            "company": "Insight Harbor",
             "job_description": (
                 "Support the analytics team by cleaning data, building reports, and "
                 "identifying trends. Proficiency in Excel and SQL required; Python "
@@ -245,8 +245,8 @@ class MockAdapter:
         },
         {
             "id": "mock-009",
-            "title": "Platform Engineer",
-            "company": "Infra Systems",
+            "title": "Site Reliability Engineer",
+            "company": "Nimbus Works",
             "job_description": (
                 "Build and maintain internal developer platforms, improve deployment "
                 "workflows, and reduce operational toil. Experience with Kubernetes, "
@@ -258,8 +258,8 @@ class MockAdapter:
         },
         {
             "id": "mock-010",
-            "title": "AI Research Engineer",
-            "company": "Research Labs",
+            "title": "LLM Evaluation Engineer",
+            "company": "Eval Forge",
             "job_description": (
                 "Conduct applied research on large language models, fine-tuning "
                 "strategies, and evaluation frameworks. Publish findings and "
@@ -267,6 +267,86 @@ class MockAdapter:
                 "equivalent experience in ML/NLP required."
             ),
             "apply_link": "https://example.com/jobs/mock-010",
+            "source": "mock",
+        },
+        {
+            "id": "mock-013",
+            "title": "Intern",
+            "company": "TinyCo",
+            "job_description": "Need intern now.",
+            "apply_link": "https://example.com/jobs/mock-013",
+            "source": "mock",
+        },
+        {
+            "id": "mock-014",
+            "title": "PLUMBER",
+            "company": "FixFast",
+            "job_description": "Fix pipes in residential and commercial buildings.",
+            "apply_link": "https://example.com/jobs/mock-014",
+            "source": "mock",
+        },
+        {
+            "id": "mock-015",
+            "title": "URGENT HIRING!!!",
+            "company": "QuickHire",
+            "job_description": "Immediate joining for office support role with basic coordination tasks.",
+            "apply_link": "https://example.com/jobs/mock-015",
+            "source": "mock",
+        },
+        {
+            "id": "mock-016",
+            "title": "Delivery Boy",
+            "company": "SpeedKart",
+            "job_description": "Deliver food packages and maintain route logs daily.",
+            "apply_link": "https://example.com/jobs/mock-016",
+            "source": "mock",
+        },
+        {
+            "id": "mock-017",
+            "title": "EARN MONEY FAST",
+            "company": "CashFlow Club",
+            "job_description": "Click links to earn money quickly from home.",
+            "apply_link": "https://example.com/jobs/mock-017",
+            "source": "mock",
+        },
+        {
+            "id": "mock-018",
+            "title": "NIGHT SHIFT OPERATOR",
+            "company": "OpsLine",
+            "job_description": "Monitor line operations and report incidents to supervisors each shift.",
+            "apply_link": "https://example.com/jobs/mock-018",
+            "source": "mock",
+        },
+        {
+            "id": "mock-019",
+            "title": "Backend Engineer ????????",
+            "company": "NoisyTech",
+            "job_description": "Build APIs with reliability focus and write tests for backend services.",
+            "apply_link": "https://example.com/jobs/mock-019",
+            "source": "mock",
+        },
+        {
+            "id": "mock-020",
+            "title": "Data Entry Clerk",
+            "company": "PaperTrail",
+            "job_description": "Data entry.",
+            "apply_link": "https://example.com/jobs/mock-020",
+            "source": "mock",
+        },
+        {
+            "id": "mock-021",
+            "title": "Customer Support",
+            "company": "HelpLoop",
+            "job_description": "Answer calls!!!!!! and chats!!!!!! with angry users!!!!!!",
+            "apply_link": "https://example.com/jobs/mock-021",
+            "source": "mock",
+        },
+        {
+            "id": "mock-022",
+            "title": "WAREHOUSE ASSISTANT",
+            "company": "StoreGrid",
+            "job_description": "Pack items and update stock movement records in the warehouse.",
+            "apply_link": "https://example.com/jobs/mock-022",
             "source": "mock",
         },
         {

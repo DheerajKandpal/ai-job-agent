@@ -14,7 +14,7 @@ import psycopg2.extras  # for RealDictCursor / automatic JSONB → dict
 from app.core.config import settings
 from app.core.logging import get_logger
 
-ALLOWED_STATUSES = ("applied", "interview", "rejected")
+ALLOWED_STATUSES = ("applied", "interview", "rejected", "no_response")
 logger = get_logger(__name__)
 
 SCHEMA_SQL = """
@@ -152,6 +152,119 @@ _MIGRATION_V2_DESCRIPTION = (
     "fix status default and add status CHECK constraint"
 )
 
+_MIGRATION_V3_SQL = [
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS outcome_status TEXT NOT NULL DEFAULT 'applied';
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS outcome_history JSONB NOT NULL DEFAULT '[]'::jsonb;
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS last_outcome_update TIMESTAMPTZ;
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS feedback_tags TEXT[] NOT NULL DEFAULT '{}'::text[];
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS first_response_at TIMESTAMPTZ;
+    """,
+    """
+    UPDATE applications
+    SET outcome_status = status
+    WHERE outcome_status IS NULL OR outcome_status = '';
+    """,
+    """
+    UPDATE applications
+    SET applied_at = COALESCE(applied_at, created_at)
+    WHERE applied_at IS NULL;
+    """,
+    """
+    UPDATE applications
+    SET last_outcome_update = COALESCE(last_outcome_update, updated_at, created_at)
+    WHERE last_outcome_update IS NULL;
+    """,
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'applications'::regclass
+              AND conname   = 'applications_status_check'
+        ) THEN
+            ALTER TABLE applications DROP CONSTRAINT applications_status_check;
+        END IF;
+        ALTER TABLE applications
+            ADD CONSTRAINT applications_status_check
+            CHECK (status IN ('applied', 'interview', 'rejected', 'no_response'));
+    END;
+    $$;
+    """,
+    """
+    ALTER TABLE applications
+        ALTER COLUMN status SET DEFAULT 'applied';
+    """,
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'applications'::regclass
+              AND conname   = 'applications_outcome_status_check'
+        ) THEN
+            ALTER TABLE applications DROP CONSTRAINT applications_outcome_status_check;
+        END IF;
+        ALTER TABLE applications
+            ADD CONSTRAINT applications_outcome_status_check
+            CHECK (outcome_status IN ('applied', 'interview', 'rejected', 'no_response'));
+    END;
+    $$;
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_applications_outcome_status ON applications(outcome_status);",
+    "CREATE INDEX IF NOT EXISTS idx_applications_first_response_at ON applications(first_response_at DESC);",
+]
+
+_MIGRATION_V3_VERSION = 3
+_MIGRATION_V3_DESCRIPTION = (
+    "add outcome tracking columns, no_response status, and related indexes"
+)
+
+_MIGRATION_V4_SQL = [
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS decision_reason TEXT;
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS score_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb;
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS applied_timestamp TIMESTAMPTZ;
+    """,
+    """
+    ALTER TABLE applications
+        ADD COLUMN IF NOT EXISTS application_method TEXT;
+    """,
+    """
+    UPDATE applications
+    SET applied_timestamp = COALESCE(applied_timestamp, created_at)
+    WHERE applied_timestamp IS NULL;
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_applications_applied_timestamp ON applications(applied_timestamp DESC);",
+]
+
+_MIGRATION_V4_VERSION = 4
+_MIGRATION_V4_DESCRIPTION = "add audit fields for decision and application dispatch"
+
 
 def _get_connection():
     """Open and return a psycopg2 connection using environment variables."""
@@ -229,6 +342,8 @@ def _apply_migrations() -> None:
     """
     migrations = [
         (_MIGRATION_V2_VERSION, _MIGRATION_V2_DESCRIPTION, _MIGRATION_V2_SQL),
+        (_MIGRATION_V3_VERSION, _MIGRATION_V3_DESCRIPTION, _MIGRATION_V3_SQL),
+        (_MIGRATION_V4_VERSION, _MIGRATION_V4_DESCRIPTION, _MIGRATION_V4_SQL),
     ]
 
     conn = None
@@ -382,9 +497,13 @@ def save_application(data: dict) -> int:
                     match_score,
                     resume_version,
                     cover_letter,
-                    status
+                    status,
+                    decision_reason,
+                    score_breakdown,
+                    applied_timestamp,
+                    application_method
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -395,6 +514,10 @@ def save_application(data: dict) -> int:
                     data.get("resume_version"),
                     data.get("cover_letter"),
                     data.get("status", "applied"),
+                    data.get("decision_reason"),
+                    psycopg2.extras.Json(data.get("score_breakdown", {})),
+                    data.get("applied_timestamp"),
+                    data.get("application_method"),
                 ),
             )
             row = cur.fetchone()
@@ -466,7 +589,17 @@ def get_application_by_id(application_id: int) -> dict:
                     resume_version,
                     cover_letter,
                     status,
-                    created_at
+                    created_at,
+                    decision_reason,
+                    score_breakdown,
+                    applied_timestamp,
+                    application_method,
+                    outcome_status,
+                    outcome_history,
+                    last_outcome_update,
+                    feedback_tags,
+                    applied_at,
+                    first_response_at
                 FROM applications
                 WHERE id = %s
                 """,
@@ -482,6 +615,92 @@ def get_application_by_id(application_id: int) -> dict:
     except psycopg2.Error as e:
         logger.error("db call error: get_application_by_id (%s)", e)
         raise RuntimeError(f"Failed to fetch application: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_outcome_fields(application_id: int) -> dict:
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    job_title,
+                    company,
+                    match_score,
+                    outcome_status,
+                    outcome_history,
+                    last_outcome_update,
+                    feedback_tags,
+                    applied_at,
+                    first_response_at
+                FROM applications
+                WHERE id = %s
+                """,
+                (application_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise ValueError("Application not found")
+        return dict(row)
+    except ValueError:
+        raise
+    except psycopg2.Error as e:
+        raise RuntimeError(f"Failed to fetch outcome fields: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def update_outcome_fields(
+    application_id: int,
+    outcome_status: str,
+    outcome_history: list[dict],
+    last_outcome_update,
+    feedback_tags: list[str],
+    applied_at,
+    first_response_at,
+) -> None:
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE applications
+                SET
+                    outcome_status = %s,
+                    outcome_history = %s::jsonb,
+                    last_outcome_update = %s,
+                    feedback_tags = %s,
+                    applied_at = %s,
+                    first_response_at = %s
+                WHERE id = %s
+                """,
+                (
+                    outcome_status,
+                    psycopg2.extras.Json(outcome_history),
+                    last_outcome_update,
+                    feedback_tags,
+                    applied_at,
+                    first_response_at,
+                    application_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise ValueError("Application not found")
+        conn.commit()
+    except ValueError:
+        raise
+    except psycopg2.Error as e:
+        if conn is not None:
+            conn.rollback()
+        raise RuntimeError(f"Failed to update outcome fields: {e}") from e
     finally:
         if conn is not None:
             conn.close()

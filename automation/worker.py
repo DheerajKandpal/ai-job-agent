@@ -51,6 +51,9 @@ from typing import TypedDict
 
 import requests
 from dotenv import load_dotenv
+from automation.application_dispatcher import apply_job, is_already_applied
+from automation.pipeline_logger import log_stage
+from automation.rate_controller import check_rate_limit, record_application
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -75,6 +78,14 @@ _REQUEST_TIMEOUT = 310
 
 # Valid decision values returned by /match
 _VALID_DECISIONS = {"HIGH", "MEDIUM", "LOW", "REJECT"}
+_APPLY_DECISIONS = {
+    d.strip().upper()
+    for d in os.getenv("APPLY_DECISIONS", "HIGH,MEDIUM,APPLY").split(",")
+    if d.strip()
+}
+_APPLICATION_MODE = os.getenv("APPLICATION_MODE", "simulate").strip().lower() or "simulate"
+_MAX_APPLICATIONS_PER_DAY = int(os.getenv("MAX_APPLICATIONS_PER_DAY", "100"))
+_COOLDOWN_BETWEEN_APPLICATIONS = int(os.getenv("COOLDOWN_BETWEEN_APPLICATIONS", "0"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -104,6 +115,9 @@ class JobResult(TypedDict):
     error:          str | None
     duration_s:     float
     timestamp:      str
+    apply_status:   str | None
+    apply_method:   str | None
+    apply_reason:   str | None
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +200,9 @@ def process_job(job: dict, job_id: int) -> JobResult:
         "error":          None,
         "duration_s":     0.0,
         "timestamp":      timestamp,
+        "apply_status":   None,
+        "apply_method":   None,
+        "apply_reason":   None,
     }
 
     def _finish(status: str, **kwargs) -> JobResult:
@@ -202,16 +219,20 @@ def process_job(job: dict, job_id: int) -> JobResult:
 
     try:
         # ── STEP 1: MATCH ────────────────────────────────────────────────
+        stage_start = time.monotonic()
         logger.info("[JOB %s] match start", job_id)
         resp = _post(f"{BASE_URL}/match", {"job_description": job_description}, "match", job_id)
         if resp is None or resp.status_code != 200:
             body = resp.text[:200] if resp is not None else "no response"
             logger.error("[JOB %s] match failed: %s", job_id, body)
+            log_stage(job_id, "match", "fail", (time.monotonic() - stage_start) * 1000, body)
             return _finish("failed", failed_at="match", error=f"match HTTP {getattr(resp, 'status_code', 'N/A')}")
 
         match_data = _parse_json(resp, "match", job_id)
         if match_data is None:
+            log_stage(job_id, "match", "fail", (time.monotonic() - stage_start) * 1000, "invalid JSON")
             return _finish("failed", failed_at="match", error="match invalid JSON")
+        log_stage(job_id, "match", "success", (time.monotonic() - stage_start) * 1000)
 
         score    = float(match_data.get("match_score", 0.0))
         decision = match_data.get("decision", "REJECT")
@@ -221,14 +242,17 @@ def process_job(job: dict, job_id: int) -> JobResult:
         result["score"]    = score
         result["decision"] = decision
         logger.info("[JOB %s] match score=%.4f decision=%s", job_id, score, decision)
+        log_stage(job_id, "decision", "success", 0, f"decision={decision}")
 
         # ── DECISION GATE ────────────────────────────────────────────────
         if decision == "LOW":
             logger.info("[JOB %s] LOW — logging only", job_id)
+            log_stage(job_id, "apply", "success", 0, "skipped_low")
             return _finish("logged")
 
         if decision == "REJECT":
             logger.info("[JOB %s] REJECT — skipping", job_id)
+            log_stage(job_id, "apply", "success", 0, "skipped_reject")
             return _finish("rejected")
 
         # HIGH or MEDIUM — continue pipeline
@@ -276,20 +300,86 @@ def process_job(job: dict, job_id: int) -> JobResult:
             "match_score":     score,
             "resume_version":  "auto_v1",
             "cover_letter":    cover_letter_text,
+            "decision_reason": f"match decision={decision}",
+            "score_breakdown": {"match_score": score, "decision": decision},
+            "applied_timestamp": datetime.now(timezone.utc).isoformat(),
+            "application_method": _APPLICATION_MODE if decision in _APPLY_DECISIONS else "none",
         }
         logger.info("[JOB %s] applications start", job_id)
         resp = _post(f"{BASE_URL}/applications/", applications_payload, "applications", job_id)
         if resp is None or resp.status_code != 200:
             body = resp.text[:200] if resp is not None else "no response"
             logger.error("[JOB %s] applications failed: %s", job_id, body)
+            log_stage(job_id, "track", "fail", 0, body)
             return _finish("failed", failed_at="applications", error=f"applications HTTP {getattr(resp, 'status_code', 'N/A')}")
 
         app_data = _parse_json(resp, "applications", job_id)
         if app_data is None:
+            log_stage(job_id, "track", "fail", 0, "invalid JSON")
             return _finish("failed", failed_at="applications", error="applications invalid JSON")
 
         app_id = app_data.get("id")
         logger.info("[JOB %s] stored application_id=%s", job_id, app_id)
+        log_stage(job_id, "track", "success", 0)
+
+        # ── STEP 5: APPLICATION DISPATCH (PHASE 2) ───────────────────────
+        # Backward-compatible: dispatch is gated by decision set and safe defaults.
+        if decision in _APPLY_DECISIONS:
+            dispatch_payload = {
+                "id": job.get("id", f"job-{job_id}"),
+                "job_id": job.get("id", f"job-{job_id}"),
+                "title": title,
+                "company": company,
+                "apply_email": job.get("apply_email"),
+                "cover_letter": cover_letter_text,
+                "resume_text": tailor_data.get("tailored_resume") if isinstance(tailor_data, dict) else None,
+            }
+
+            # Idempotency first: duplicates should be classified as duplicate-skipped
+            # even if current rate limits would block new applications.
+            if is_already_applied(dispatch_payload):
+                logger.info("[JOB %s] duplicate application skipped", job_id)
+                result["apply_status"] = "skipped_duplicate"
+                result["apply_method"] = _APPLICATION_MODE
+                result["apply_reason"] = "already_applied"
+                log_stage(job_id, "apply", "success", 0, "skipped_duplicate")
+                return _finish("completed", application_id=app_id)
+
+            allowed, rate_reason = check_rate_limit(
+                _MAX_APPLICATIONS_PER_DAY,
+                _COOLDOWN_BETWEEN_APPLICATIONS,
+            )
+            if not allowed:
+                logger.info(
+                    "[JOB %s] apply skipped due to rate limit (%s)",
+                    job_id,
+                    rate_reason,
+                )
+                result["apply_status"] = "skipped_rate_limit"
+                result["apply_method"] = _APPLICATION_MODE
+                result["apply_reason"] = rate_reason
+                log_stage(job_id, "apply", "fail", 0, rate_reason)
+                return _finish("completed", application_id=app_id)
+            dispatch_result = apply_job(dispatch_payload, mode=_APPLICATION_MODE)
+            result["apply_status"] = dispatch_result.get("status")
+            result["apply_method"] = dispatch_result.get("method")
+            result["apply_reason"] = dispatch_result.get("reason")
+
+            if dispatch_result.get("status") == "sent":
+                record_application()
+                logger.info("[JOB %s] application dispatched (%s)", job_id, dispatch_result.get("method"))
+                log_stage(job_id, "apply", "success", 0)
+            elif dispatch_result.get("status") == "skipped_duplicate":
+                logger.info("[JOB %s] duplicate application skipped", job_id)
+                log_stage(job_id, "apply", "success", 0, "skipped_duplicate")
+            else:
+                logger.warning(
+                    "[JOB %s] application dispatch failed (%s)",
+                    job_id,
+                    dispatch_result.get("reason"),
+                )
+                log_stage(job_id, "apply", "fail", 0, str(dispatch_result.get("reason")))
+
         return _finish("completed", application_id=app_id)
 
     except Exception as exc:
@@ -379,5 +469,10 @@ def process_jobs_batch(
     logger.info("batch complete: %d jobs in %.1fs", n, total_s)
     logger.info("status distribution  : %s", dict(status_counts))
     logger.info("decision distribution: %s", dict(decision_counts))
+    apply_counts = Counter((r.get("apply_status") or "not_attempted") for r in final)
+    logger.info("application dispatch : %s", dict(apply_counts))
+    logger.info("applied jobs: %d", apply_counts.get("sent", 0))
+    logger.info("skipped due to rate limit: %d", apply_counts.get("skipped_rate_limit", 0))
+    logger.info("duplicates skipped: %d", apply_counts.get("skipped_duplicate", 0))
 
     return final

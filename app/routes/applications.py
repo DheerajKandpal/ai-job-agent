@@ -23,6 +23,10 @@ class ApplyRequest(BaseModel):
     match_score: Optional[float] = None
     resume_version: Optional[str] = None
     cover_letter: Optional[str] = None
+    decision_reason: Optional[str] = None
+    score_breakdown: Optional[dict] = None
+    applied_timestamp: Optional[datetime] = None
+    application_method: Optional[str] = None
 
 
 class ApplyResponse(BaseModel):

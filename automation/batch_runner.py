@@ -23,12 +23,15 @@ automation/runner.py is preserved as the rollback path and must not be modified.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import time
 from collections import Counter
 from pathlib import Path
 
+from automation.metrics_collector import build_metrics, save_metrics
+from automation.pipeline_logger import log_stage
 from automation.worker import process_jobs_batch
 
 # ---------------------------------------------------------------------------
@@ -164,8 +167,8 @@ def _print_report(results: list[dict], total_s: float) -> None:
 
     # Per-job table
     header = (
-        f"{'ID':>3}  {'Title':<35} {'Company':<20} {'Decision':<8} "
-        f"{'Status':<10} {'Score':>6}  {'AppID':>6}  {'Time':>6}"
+        f"{'ID':>3}  {'Title':<28} {'Company':<16} {'Decision':<8} "
+        f"{'Status':<10} {'Apply':<18} {'Score':>6}  {'AppID':>6}  {'Time':>6}"
     )
     print(header)
     print("-" * len(header))
@@ -173,13 +176,14 @@ def _print_report(results: list[dict], total_s: float) -> None:
         app_id = str(r["application_id"]) if r["application_id"] else "-"
         score  = f"{r['score']:.3f}" if r["score"] is not None else "-"
         dur    = f"{r['duration_s']:.1f}s"
-        title  = (r["title"] or "")[:34]
-        co     = (r["company"] or "")[:19]
+        title  = (r["title"] or "")[:27]
+        co     = (r["company"] or "")[:15]
         dec    = (r["decision"] or "-")[:8]
         status = r["status"][:10]
+        apply_status = (r.get("apply_status") or "-")[:17]
         print(
-            f"{r['job_id']:>3}  {title:<35} {co:<20} {dec:<8} "
-            f"{status:<10} {score:>6}  {app_id:>6}  {dur:>6}"
+            f"{r['job_id']:>3}  {title:<28} {co:<16} {dec:<8} "
+            f"{status:<10} {apply_status:<18} {score:>6}  {app_id:>6}  {dur:>6}"
         )
 
     # Summary
@@ -188,6 +192,8 @@ def _print_report(results: list[dict], total_s: float) -> None:
     decision_counts = Counter((r["decision"] or "unknown") for r in results)
     print(f"  Status   : {dict(status_counts)}")
     print(f"  Decision : {dict(decision_counts)}")
+    apply_counts = Counter((r.get("apply_status") or "not_attempted") for r in results)
+    print(f"  Apply    : {dict(apply_counts)}")
 
     # Failures
     failed = [r for r in results if r["status"] == "failed"]
@@ -222,21 +228,54 @@ def _load_jobs_from_source(source: str, limit: int | None) -> list[dict]:
     fetch_limit = limit if limit is not None else 50  # sensible default cap
 
     logger.info("[RUNNER] Fetching jobs from source '%s' (limit=%d)", source, fetch_limit)
+    t0 = time.monotonic()
     raw_jobs = fetch_jobs([source], fetch_limit)
+    log_stage("batch", "fetch", "success", (time.monotonic() - t0) * 1000)
     logger.info("[RUNNER] Fetched %d jobs from ingestion", len(raw_jobs))
 
     if not raw_jobs:
         logger.warning("[RUNNER] No jobs returned from source '%s' after deduplication", source)
+        log_stage("batch", "fetch", "fail", 0, "no jobs returned after dedup")
         return []
 
+    t1 = time.monotonic()
     filtered_jobs = filter_jobs(raw_jobs)
+    log_stage("batch", "filter", "success", (time.monotonic() - t1) * 1000)
     logger.info("[RUNNER] %d jobs after filtering", len(filtered_jobs))
 
     if not filtered_jobs:
         logger.warning("[RUNNER] No jobs remain after filtering — skipping pipeline")
+        log_stage("batch", "filter", "fail", 0, "all jobs filtered")
         return []
 
     return filtered_jobs
+
+
+def _job_key(job: dict) -> str:
+    raw = (
+        (job.get("title") or "").strip().lower()
+        + "|"
+        + (job.get("company") or "").strip().lower()
+        + "|"
+        + (job.get("job_description") or "").strip().lower()
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _job_key_light(title: str, company: str) -> str:
+    raw = title.strip().lower() + "|" + company.strip().lower()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_previous_results(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +304,11 @@ def main() -> None:
             "via job_filter. When omitted, the static JOBS list is used."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume incomplete batch by skipping already completed jobs from run_results.json",
+    )
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -287,6 +331,22 @@ def main() -> None:
         # Static path: backward-compatible, identical to original behaviour
         jobs = JOBS[: args.jobs] if args.jobs else JOBS
 
+    output_path = Path(__file__).resolve().parent.parent / "run_results.json"
+    previous_results: list[dict] = _load_previous_results(output_path) if args.resume else []
+    if args.resume and previous_results:
+        completed_keys = {
+            _job_key_light(str(r.get("title") or ""), str(r.get("company") or ""))
+            for r in previous_results
+            if r.get("status") in {"completed", "logged", "rejected"}
+        }
+        jobs = [
+            j
+            for j in jobs
+            if _job_key_light(str(j.get("title") or ""), str(j.get("company") or ""))
+            not in completed_keys
+        ]
+        logger.info("[RUNNER] Resume mode: %d jobs remain after skipping completed", len(jobs))
+
     print(
         f"Starting batch: {len(jobs)} jobs, {args.workers} workers, "
         f"{args.stagger}s stagger"
@@ -296,13 +356,17 @@ def main() -> None:
     results = process_jobs_batch(jobs, max_workers=args.workers, stagger_seconds=args.stagger)
     total_s = round(time.monotonic() - t_start, 2)
 
-    _print_report(results, total_s)
+    merged_results = previous_results + results if args.resume else results
+    _print_report(merged_results, total_s)
 
     # Persist results
-    output_path = Path(__file__).resolve().parent.parent / "run_results.json"
     with open(output_path, "w") as f:
-        json.dump(results, f, indent=2, default=str)
+        json.dump(merged_results, f, indent=2, default=str)
     print(f"\nResults saved to: {output_path}")
+
+    metrics = build_metrics(merged_results)
+    save_metrics(metrics)
+    print(f"Metrics saved to: {Path(__file__).resolve().parent / 'metrics.json'}")
 
 
 if __name__ == "__main__":
