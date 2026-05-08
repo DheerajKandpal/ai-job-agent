@@ -28,8 +28,8 @@ def classify_match(score: float) -> str:
 
 
 def process_match(job_description: str) -> dict:
-    # Service-level validation: reject only truly empty/whitespace payloads.
-    cleaned = (job_description or "").strip()
+    # Service-level validation: reject empty, whitespace-only, or non-printable-only payloads.
+    cleaned = "".join(c for c in (job_description or "") if c.isprintable()).strip()
     if not cleaned:
         raise ValueError("job_description cannot be empty")
 

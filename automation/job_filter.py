@@ -83,14 +83,17 @@ def _is_all_caps_title(title: str) -> bool:
     """
     if not title:
         return False
-    # Must equal its own upper-case version
-    if title != title.upper():
-        return False
-    # Must contain at least one letter (avoid flagging purely numeric/symbol titles)
+    # Must contain at least one letter
     if not any(c.isalpha() for c in title):
         return False
     # Every character must be a letter or space
-    return all(c.isalpha() or c == " " for c in title)
+    if not all(c.isalpha() or c == " " for c in title):
+        return False
+    # Must have at least one uppercase letter and no lowercase letters
+    # (handles Unicode chars where upper() == self but they're not truly uppercase)
+    has_upper = any(c.isupper() for c in title)
+    has_lower = any(c.islower() for c in title)
+    return has_upper and not has_lower
 
 
 def _has_excessive_punctuation(text: str) -> bool:

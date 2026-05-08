@@ -104,11 +104,22 @@ _MIGRATION_V2_SQL = [
     # 2. Backfill resume_version from tailored_resume_path for rows where
     #    resume_version is still NULL and tailored_resume_path has a value.
     #    Idempotent: only touches rows where resume_version IS NULL.
+    #    Guard: skip if tailored_resume_path column does not exist (fresh DB).
     """
-    UPDATE applications
-    SET resume_version = tailored_resume_path
-    WHERE resume_version IS NULL
-      AND tailored_resume_path IS NOT NULL;
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'applications'
+              AND column_name = 'tailored_resume_path'
+        ) THEN
+            UPDATE applications
+            SET resume_version = tailored_resume_path
+            WHERE resume_version IS NULL
+              AND tailored_resume_path IS NOT NULL;
+        END IF;
+    END;
+    $$;
     """,
 
     # 3. Fix the status default so new rows land on 'applied', not 'generated'.

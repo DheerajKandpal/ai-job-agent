@@ -81,7 +81,7 @@ def main() -> int:
         print("[PIPELINE] Tailored resume accepted")
         final_resume = tailored_resume
 
-    cover_letter = generate_cover_letter(final_resume, JOB_DESCRIPTION)
+    cover_letter = generate_cover_letter(JOB_DESCRIPTION, final_resume)
     cover_score = score_text_against_jd(
         cover_letter,
         JOB_DESCRIPTION,

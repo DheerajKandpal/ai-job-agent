@@ -476,7 +476,9 @@ _resume_st = st.fixed_dictionaries({
     "summary": st.text(min_size=0, max_size=200),
     "experience": st.lists(st.text(min_size=0, max_size=100), min_size=0, max_size=5),
 })
-_nonempty_jd_st = st.text(min_size=1, max_size=500).filter(lambda s: s.strip())
+_nonempty_jd_st = st.text(min_size=1, max_size=500).filter(
+    lambda s: "".join(c for c in s if c.isprintable()).strip()
+)
 
 
 class TestProcessMatchStructuralPropertyBased(unittest.TestCase):
